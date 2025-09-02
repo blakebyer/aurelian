@@ -15,6 +15,8 @@ from aurelian.utils.pubmed_utils import (
     get_abstract_from_pubmed,
 )
 from aurelian.utils.pdf_fetcher import extract_text_from_pdf
+
+import re
 from aurelian.utils.search_utils import web_search, retrieve_web_page
 
 
@@ -160,6 +162,28 @@ async def search_literature_web(query: str) -> str:
         return result
     except Exception as e:
         raise ModelRetry(f"Error searching the web for '{query}': {str(e)}")
+
+
+# New function: search the web and extract PMIDs from results
+async def literature_search_pmids(query: str) -> list:
+    """
+    Search the web for scientific literature and extract PubMed IDs (PMIDs) from the results.
+    Only performs a simple web search and regex extraction of PMIDs from PubMed URLs.
+    """
+    print(f"SEARCH WEB FOR PMIDs RELATED TO: {query}")
+    try:
+        result = web_search(query)
+        if not result:
+            raise ModelRetry(f"No search results found for query: {query}. Try using different keywords.")
+        # Extract PMIDs from PubMed URLs in the result
+        # Example PubMed URL: https://pubmed.ncbi.nlm.nih.gov/12345678/
+        pmid_pattern = r"pubmed\.ncbi\.nlm\.nih\.gov\/(\d+)"
+        pmids = re.findall(pmid_pattern, result)
+        # Remove duplicates and normalize to PMID:NNNN
+        pmids = list({f"PMID:{p}" for p in pmids})
+        return pmids
+    except Exception as e:
+        raise ModelRetry(f"Error searching the web for PMIDs for '{query}': {str(e)}")
 
 
 async def retrieve_literature_page(url: str) -> str:
