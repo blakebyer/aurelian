@@ -22,15 +22,15 @@ from typing import List
 from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
 import inspect
 from functools import wraps
-import requests_cache
+#import requests_cache
 
 # cache all requests to NCBI/OMIM/PubMed for 3 days to avoid rate limits
-requests_cache.install_cache(
-    "hpoa_cache",
-    expire_after=3*24*3600,           # 3 days
-    allowable_methods=("GET",),       # only cache GETs (safe)
-    stale_if_error=True
-)
+# requests_cache.install_cache(
+#     "hpoa_cache",
+#     expire_after=3*24*3600,           # 3 days
+#     allowable_methods=("GET",),       # only cache GETs (safe)
+#     stale_if_error=True
+# )
 
 HPOA_SYSTEM_PROMPT = ("""
 You are an expert biocurator for HPO/MONDO/OMIM. You curate phenotype.hpoa Human Phenotype Ontology Annotation rows for a **specific disease**.
