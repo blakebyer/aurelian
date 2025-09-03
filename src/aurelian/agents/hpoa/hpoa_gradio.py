@@ -27,22 +27,31 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
         deps = HPOADependencies()
 
     def get_info(query: str, history: List[str]) -> str:
+        # Keep it stateless and fast; still log incoming history for debugging
+        # Gradio will render Markdown/newlines in the returned string
         print(f"QUERY: {query}")
-        print(f"HISTORY: {history}")
-        if history:
-            query += "## History"
-            for h in history:
-                query += f"\n{h}"
+        try:
+            print(f"HISTORY: {history}")
+        except Exception:
+            pass
         try:
             # Use the retrying runner defined in hpoa_agent.py
             result = call_agent_with_retry(query)
             data = result.output
-            # Serialize pydantic models or Python objects to a string for ChatInterface
-            if hasattr(data, "model_dump_json"):
-                return data.model_dump_json(indent=2)
+            # Prefer conversational text; append a copyable JSON block when annotations are present
             if hasattr(data, "model_dump"):
-                return json.dumps(data.model_dump(), indent=2)
+                dd = data.model_dump()
+                text = dd.get("text") or ""
+                ann = dd.get("annotations") or []
+                if ann:
+                    block = json.dumps({
+                        "explanation": (text or ""),
+                        "annotations": ann,
+                    }, indent=2)
+                    return f"{text}\n\n```json\n{block}\n```"
+                return text if text else json.dumps(dd, indent=2)
             if isinstance(data, (dict, list)):
+                # Fallback: pretty print dicts/lists, which Gradio will render with newlines
                 return json.dumps(data, indent=2)
             return str(data)
         except Exception as e:
@@ -52,9 +61,10 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
         fn=get_info,
         type="messages",
         title="HPOA AI Assistant",
+        chatbot=gr.Chatbot(show_copy_button=True, render_markdown=True),
         examples=[
             ["Make HPOA file suggestions for Niemann-Pick, type C"],
-            ["What phenotypes are associated with Coffin-Lowry syndrome?"],
+            ["What neurological phenotypes are associated with Coffin-Lowry syndrome?"],
             ["List the phenotype annotations for OMIM:301500"],
             ["Return the phenotypes for PMID:19473999"]
         ]
