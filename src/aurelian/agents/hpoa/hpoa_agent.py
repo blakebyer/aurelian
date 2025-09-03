@@ -26,7 +26,7 @@ import requests_cache
 
 # cache all requests to NCBI/OMIM/PubMed for 3 days to avoid rate limits
 requests_cache.install_cache(
-    "ncbi_cache",
+    "hpoa_cache",
     expire_after=3*24*3600,           # 3 days
     allowable_methods=("GET",),       # only cache GETs (safe)
     stale_if_error=True
@@ -149,7 +149,7 @@ def call_agent_with_retry(input: str):
     )
 
 hpoa_agent = Agent(
-    model="openai:gpt-4.1",
+    model="openai:gpt-4o",
     output_type=HPOAResponse,
     system_prompt=HPOA_SYSTEM_PROMPT,
     tools=[
