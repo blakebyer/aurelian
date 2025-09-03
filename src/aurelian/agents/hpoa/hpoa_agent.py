@@ -22,6 +22,15 @@ from typing import List
 from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
 import inspect
 from functools import wraps
+import requests_cache
+
+# cache all requests to NCBI/OMIM/PubMed for 3 days to avoid rate limits
+requests_cache.install_cache(
+    "ncbi_cache",
+    expire_after=3*24*3600,           # 3 days
+    allowable_methods=("GET",),       # only cache GETs (safe)
+    stale_if_error=True
+)
 
 HPOA_SYSTEM_PROMPT = ("""
 You are an expert biocurator for HPO/MONDO/OMIM. You curate phenotype.hpoa Human Phenotype Ontology Annotation rows for a **specific disease**.
@@ -130,7 +139,7 @@ class ToolLimiter:
         return wrapper
 
 # retry logic for transient API errors
-@retry(wait=wait_random_exponential(min=1, max=30), stop=stop_after_attempt(4),
+@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6),
        retry=retry_if_exception_type(ModelHTTPError))
 def call_agent_with_retry(input: str):
     return hpoa_agent.run_sync(
