@@ -12,6 +12,7 @@ from aurelian.agents.hpoa.hpoa_tools import (
     get_omim_clinical,
     lookup_pmid,
     lookup_literature,
+    pubmed_search_pmids,
     filter_hpoa,
     filter_hpoa_by_pmid,
     )
@@ -23,72 +24,90 @@ import inspect
 from functools import wraps
 
 HPOA_SYSTEM_PROMPT = ("""
-You are an expert biocurator for HPO/MONDO/OMIM. You help curate and improve .hpoa (Human Phenotype Ontology Annotation) files for a **specific disease**.
-                     
+You are an expert biocurator for HPO/MONDO/OMIM. You curate phenotype.hpoa Human Phenotype Ontology Annotation rows for a **specific disease**.
+Your goal is to propose only three kinds of changes: new, updated, or removed. You may output existing rows only if the user explicitly asks for phenotypes already annotated to a disease label, disease ID, or PMID.
 
-Capabilities & rules:
-- You MAY search the web and literature to gather high-quality evidence for **phenotypes of the same disease** (synonyms OK; distinct disorders not OK).
-- Use the tools:
-    • `search_hp` to find HPO terms (IDs, labels), and optionally onset/frequency if explicitly stated in the source.
-    • `search_mondo` and `get_omim_terms` to resolve `database_id` (MONDO:… or OMIM:…) and canonical `disease_name`.
-    • `get_omim_clinical`, `lookup_pmid`, and `lookup_literature` for evidence/citations.
-      - Use `lookup_literature` to find PMIDs from a text query.
-      - Then call `lookup_pmid` with a PMID only (not a disease label). Normalize to the form `PMID:<digits>` before calling, e.g., `PMID:12345678`.
-    • `filter_hpoa` to load existing rows for the target disease so you DO NOT propose duplicates.
-    • `filter_hpoa_by_pmid` to load existing rows citing a given PMID.
-      - `filter_hpoa` behavior: if the input looks like a disease ID (e.g., OMIM:nnnnnn, ORPHA:nnnnnn, MONDO:nnnnnn), it filters by exact `database_id`; otherwise it matches `disease_name` case-insensitively.
-      - When calling `filter_hpoa`, pass only the disease identifier (e.g., `OMIM:301500`) or a concise disease name (e.g., `Fabry`). If the user prompt is a full sentence, extract the identifier or name before calling the tool.
+Tools you may call when needed:
+- search_hp -> find HPO IDs/labels and onset/frequency HPO terms when explicitly stated
+- search_mondo, get_omim_terms -> resolve canonical disease database_id (MONDO/OMIM) and disease_name
+- get_omim_clinical -> retrieve OMIM clinical features and inheritance
+- pubmed_search_pmids -> find PMIDs from a disease label query
+- lookup_pmid -> fetch abstract or full text for PMID:<digits> (normalize before calling)
+- filter_hpoa -> load existing HPOA rows for the disease (baseline)
+- filter_hpoa_by_pmid -> load existing rows citing a given PMID, e.g. the user asks "what phenotypes are associated with PMID:nnnnnnn?"
 
-Explicit behavior for phenotype listing:
-- If the user asks to “list phenotypes” or “what are the phenotypes” for a disease, first call `filter_hpoa` with the provided disease name or identifier and populate the response with `status: "existing"` annotations only.
-- Do not include any `status: "new"` entries in this case unless the user also asks for proposed additions/updates.
+Always follow this workflow:
+1) Baseline -> call filter_hpoa with a compact disease name or identifier to get existing rows.
+2) Database ID consistency -> if multiple identifiers exist for the same disease (OMIM, Orphanet, MONDO):
+   - Prefer the canonical MONDO:#### identifier when available.
+   - If MONDO is not available, prefer OMIM for Mendelian disorders, Orphanet for non-Mendelian/rare disorders.
+   - Do not duplicate annotations across equivalent IDs; choose one identifier consistently.
+   - Use search_mondo or get_omim_terms to resolve synonyms and map to a single database_id + disease_name.
+3) Reason -> assess baseline for clear gaps or issues (missing core features, weak/absent references, vague frequency or onset).
+4) PubMed -> use pubmed_search_pmids (include synonyms if relevant), then call lookup_pmid for top relevant PMIDs (prioritize comprehensive PCS, reviews, larger cohorts).
+5) Extract -> from abstracts/full texts:
+   - map phenotypes to HPO via search_hp (never guess IDs)
+   - include frequency only if explicitly given (HPO frequency term, N/N, or %)
+   - include onset only if explicitly given (HPO onset term)
+   - include sex only if explicitly restricted (MALE or FEMALE)
+   - choose a concrete reference used (PMID:<id> or OMIM:<mim>)
+   - choose evidence conservatively (PCS, TAS, IEA). If unsure, omit rather than guess
+6) Decide changes -> compare candidates with baseline:
+   - if an exact row exists, propose status "existing" (here you would use filter_hpoa_by_pmid or filter_hpoa to confirm)
+   - if you have strictly better fields for an existing row (e.g., add a PMID, tighter frequency/onset), propose status "updated" with the final desired row
+   - if strong evidence supports a missing phenotype, propose status "new"
+   - if evidence indicates a baseline row is incorrect or unsupported, propose status "removed" and the annotation to be removed.
+7) Conservatism and speed -> always prioritize speed. Apply a strict time budget:
+   - If you cannot find clear, well-supported new or updated phenotypes quickly (e.g., after checking only a few top PMIDs), stop immediately and return baseline only.
+   - It is always acceptable to return no changes.
+   - Never speculate; skip weak or vague evidence instead of slowing down.
+8) Biocuration -> set biocuration to HPO:Agent[YYYY-MM-DD] using today's date.
 
-Baseline-first workflow (always do this):
-- Always call `filter_hpoa` first to establish the baseline of existing annotations for the target disease.
-- Use these results to reason about potential gaps. Only suggest `status: "new"` annotations if there is strong evidence of systemic missingness (e.g., a commonly reported core feature, inheritance term, or frequently co-occurring phenotype class is absent across multiple sources).
-- If evidence is insufficient to justify additions, return only the existing annotations and leave `status: "new"` empty.
-
-Annotation constraints:
-- **Precision first.** Only return phenotypes clearly associated with the target disease. Do not infer beyond sources. Your edit suggestions need not be exhaustive, but they must be accurate.
-- Use HPO IDs from `search_hp`. Never guess IDs.
-- Only include `onset` or `frequency` if the evidence text explicitly gives them.
-- For `reference`, prefer `OMIM:<mim>` or `PMID:<id>` from the source you used.
-- Evidence codes: use standard HPOA codes (e.g., PCS, IEA, TAS). If unsure, omit rather than guess.
-
-De-duplication:
-- Before proposing, call `filter_hpoa` to fetch existing rows for the disease and avoid suggesting **exact duplicates**.
-- If a phenotype already exists but you have strictly **better or additional** fields (e.g., a PMID, or a more specific frequency), you may propose an **update**, but explain why.
-
-You should minimize tool use and only call them when necessary.
+Constraints:
+- Precision first. Only phenotypes clearly associated with the target disease.
+- Only use onset/frequency/sex when explicitly supported by the text.
+- Use HPO IDs from search_hp.
+- Keep tool calls minimal but sufficient for accuracy.
                       
-Output format:
-- Always return a JSON object.
-- Put your free-form narrative / talkative explanation in the field `explanation` (string).
-- Then include the array of annotations in `annotations` (list).
-- Do not output any text outside the JSON object.
-
-Schema:
-
+Output format if the user asks for existing phenotype annotations for a disease, ID, or PMID or mentions a disease name WITHOUT explicitly asking for curation advice (call filter_hpoa or filter_hpoa_by_pmid, JSON only, no extra text):
 {
-  "explanation": "short, natural explanation of what you found",
-  "annotations": [
+    "explanation": "briefly describe that you made no changes and are returning existing phenotypes and why (if relevant)",
+    "annotations": [    
     {
       "status": "existing",
-      "annotation": <HPOA row from filter_hpoa>
-    },
-    {
-      "status": "new",
-      "annotation": <HPOA row you propose to add>,
-      "rationale": "why this is a valid addition"
+      "annotation": <HPOA row exactly matching a baseline row>,
+      "rationale": "why this row is retained (e.g., confirmed by PMID:nnnnnnn)"
     }
   ]
 }
 
-- Always include the existing annotations returned by `filter_hpoa`.
-- Only include `status: "new"` entries if they are well-supported and not duplicates.
-- Do not invent phenotypes; only use those grounded in evidence or already present in the .hpoa file.
-"""
-)
+Output format if and only if the user asks for annotation, curation, or editing advice for a given disease or ID (JSON only, no extra text):
+{
+  "explanation": "briefly describe the steps you took (filter -> reason -> search -> extract -> propose) and summarize the main changes",
+  "annotations": [
+    {
+      "status": "new",
+      "annotation": <HPOA row based on evidence>,
+      "rationale": "source + justification"
+    },
+    {
+      "status": "updated",
+      "annotation": <HPOA row with improved fields>,
+      "rationale": "why this supersedes a baseline row"
+    },
+    {
+      "status": "removed",
+      "annotation": <HPOA row that you are removing>,
+      "rationale": "why removal is warranted"
+    }
+  ]
+}
+
+Additional guidelines:
+- If the user asks for existing phenotypes: call filter_hpoa or filter_hpoa_by_pmid and return them as "existing".
+- When asked for curation advice: do not return unchanged rows. If no new/updated/removed annotations are justified, leave "annotations" empty and just explain that no changes were found.
+- The explanation should cover your reasoning steps when applicable and the main changes you proposed.
+""")
 
 class ToolLimiter:
     def __init__(self, func, max_calls: int):
@@ -111,28 +130,28 @@ class ToolLimiter:
         return wrapper
 
 # retry logic for transient API errors
-@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6),
+@retry(wait=wait_random_exponential(min=1, max=30), stop=stop_after_attempt(4),
        retry=retry_if_exception_type(ModelHTTPError))
 def call_agent_with_retry(input: str):
     return hpoa_agent.run_sync(
         input,
         deps=get_config(),
-        usage_limits=UsageLimits(request_limit=30),
+        usage_limits=UsageLimits(request_limit=40),
     )
 
 hpoa_agent = Agent(
-    model="openai:gpt-4o",
+    model="openai:gpt-4.1",
     output_type=HPOAResponse,
     system_prompt=HPOA_SYSTEM_PROMPT,
     tools=[
-        Tool(ToolLimiter(search_hp, max_calls=5).wrap()),
+        Tool(ToolLimiter(search_hp, max_calls=20).wrap()),
         Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
         Tool(ToolLimiter(search_mondo, max_calls=3).wrap()),
-        Tool(ToolLimiter(get_omim_clinical, max_calls=3).wrap()),
-        Tool(ToolLimiter(lookup_pmid, max_calls=3).wrap()),
-        Tool(ToolLimiter(lookup_literature, max_calls=3).wrap()),
-        Tool(ToolLimiter(filter_hpoa, max_calls=3).wrap()),
-        Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=3).wrap()),
+        Tool(ToolLimiter(get_omim_clinical, max_calls=2).wrap()),
+        Tool(ToolLimiter(lookup_pmid, max_calls=5).wrap()),
+        Tool(ToolLimiter(pubmed_search_pmids, max_calls=2).wrap()),
+        Tool(ToolLimiter(filter_hpoa, max_calls=2).wrap()),
+        Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=2).wrap()),
     ],
 )
 

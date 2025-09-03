@@ -5,15 +5,12 @@ import asyncio
 from typing import Dict, List, Any
 import requests
 import httpx
-import re
-
+import re, os
 from pydantic_ai import RunContext, ModelRetry
-
-from aurelian.utils.data_utils import obj_to_dict
 from .hpoa_config import HPOADependencies, HPOA, get_config
 from aurelian.agents.literature.literature_tools import (
     lookup_pmid as literature_lookup_pmid,
-    literature_search_pmids
+    literature_search_pmids as literature_search_pmids,
     )
 from oaklib.datamodels.search import SearchConfiguration
 
@@ -160,7 +157,6 @@ async def filter_hpoa(ctx: RunContext[HPOADependencies], label: str) -> List[HPO
 
     return results
 
-
 async def filter_hpoa_by_pmid(ctx: RunContext[HPOADependencies], pmid: str) -> List[HPOA]:
     """
     Return all phenotype.hpoa rows that cite a given PMID in the `reference` field.
@@ -202,3 +198,47 @@ async def lookup_literature(query: str) -> List[str]:
         List of matching PMIDs
     """
     return await literature_search_pmids(query)
+
+async def pubmed_search_pmids(ctx: RunContext[HPOADependencies], query: str, retmax: int = 20) -> list:
+    """
+    Search PubMed (via NCBI ESearch API) for PMIDs matching a text query.
+    
+    Args:
+        query (str): Search query for PubMed.
+        retmax (int): Maximum number of PMIDs to return. Default = 20.
+
+    Returns:
+        list: List of PMIDs in the format ["PMID:123456", ...].
+    """
+    config = ctx.deps or get_config()
+    NCBI_API_KEY = config.ncbi_api_key
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    params = {
+        "db": "pubmed",
+        "term": query,
+        "retmode": "json",
+        "retmax": retmax,
+        "api_key": NCBI_API_KEY or "",
+    }
+    headers = {"Accept": "application/json"}
+
+    print(f"SEARCH PUBMED FOR PMIDs RELATED TO: {query}")
+
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        r = await client.get(url, params=params, headers=headers)
+        try:
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            raise ModelRetry(
+                f"PubMed search failed: {e.response.status_code} {e.response.text[:200]}"
+            )
+        try:
+            data = r.json()
+        except ValueError:
+            raise ModelRetry("PubMed search returned non-JSON response")
+
+    # Extract PMIDs from JSON
+    pmids = data.get("esearchresult", {}).get("idlist", [])
+    pmids = [f"PMID:{p}" for p in pmids]
+
+    return pmids

@@ -1,11 +1,11 @@
 """ Configuration file for HPOA Agent """
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
 from dataclasses import dataclass, field
 import os, csv, httpx, subprocess
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, TypedDict, Literal
 from oaklib import get_adapter
 from oaklib.interfaces import BasicOntologyInterface
+from datetime import date
 
 from aurelian.dependencies.workdir import HasWorkdir, WorkDir
 
@@ -26,24 +26,26 @@ class HPOA(BaseModel):
                               Terms with the I aspect are from the Inheritance subontology.
                               Terms with the C aspect are located in the Clinical course subontology, which includes onset, mortality, and other terms related to the temporal aspects of disease.
                               Terms with the M aspect are located in the Clinical Modifier subontology.""")	
-    biocuration: str = Field(..., description="""This refers to the biocurator who made the annotation and the date on which the annotation was made; the date format is YYYY-MM-DD. The first entry in this field refers to the creation date. Any additional biocuration is recorded following a semicolon. So, if Joseph curated on July 5, 2012, and Suzanna curated on December 7, 2015, one might have a field like this: HPO:Joseph[2012-07-05];HPO:Suzanna[2015-12-07]. It is acceptable to use ORCID ids.""")
+    biocuration: str = Field(..., 
+                             default_factory = lambda: f"HPO:Agent[{date.today().isoformat()}]",description="""This refers to the biocurator who made the annotation and the date on which the annotation was made; the date format is YYYY-MM-DD. The first entry in this field refers to the creation date. Any additional biocuration is recorded following a semicolon. So, if Joseph curated on July 5, 2012, and Suzanna curated on December 7, 2015, one might have a field like this: HPO:Joseph[2012-07-05];HPO:Suzanna[2015-12-07]. It is acceptable to use ORCID ids.""")
 
 class HPOAResult(BaseModel):
-    status: Literal["existing", "new"] = Field(
-        ..., description="Whether this annotation was already present in phenotype.hpoa or is newly suggested."
+    status: Literal["existing", "new", "updated", "removed"] = Field(
+        ..., description="Whether this annotation was existing, new, updated, or suggested for removal from the phenotype.hpoa file."
     )
     rationale: Optional[str] = None
     annotation: HPOA
 
 class HPOAResponse(BaseModel):
     explanation: str = Field(..., description="A brief natural language explanation of what was found and done.")
-    annotations: List[HPOAResult] = Field(default_factory=list)
+    annotations: List[HPOAResult]
 
 @dataclass
 class HPOADependencies(HasWorkdir):
     """Configuration for the HPOA agent."""
     openai_api_key: Optional[str] = None
     omim_api_key: Optional[str] = None
+    ncbi_api_key: Optional[str] = None
     
     def __post_init__(self):
         """Initialize the config with default values."""
@@ -58,6 +60,10 @@ class HPOADependencies(HasWorkdir):
         if self.omim_api_key is None:
             import os
             self.omim_api_key = os.environ.get("OMIM_API_KEY")
+        
+        if self.ncbi_api_key is None:
+            import os
+            self.ncbi_api_key = os.environ.get("NCBI_API_KEY")
 
     def get_mondo_adapter(self) -> BasicOntologyInterface:
         """Get a configured Mondo adapter."""

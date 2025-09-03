@@ -65,6 +65,7 @@ if __name__ == "__main__":
     # Ensure required API keys are set before launching
     openai_key = os.environ.get("OPENAI_API_KEY")
     omim_key = os.environ.get("OMIM_API_KEY")
+    ncbi_key = os.environ.get("NCBI_API_KEY")
     if not openai_key:
         print("ERROR: Missing required environment variable: OPENAI_API_KEY")
         print("Set it before launching. Example (PowerShell):")
@@ -72,6 +73,8 @@ if __name__ == "__main__":
         raise SystemExit(1)
     if not omim_key:
         print("WARNING: OMIM_API_KEY not set. OMIM tools will be unavailable.")
+    if not ncbi_key:
+        print("WARNING: NCBI_API_KEY not set. PubMed tools will be rate-limited.")
 
     port = int(os.environ.get("AURELIAN_PORT", "7860"))
     host = os.environ.get("AURELIAN_HOST", "127.0.0.1")

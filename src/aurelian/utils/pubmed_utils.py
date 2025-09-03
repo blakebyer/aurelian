@@ -1,4 +1,4 @@
-import re
+import re, os
 from typing import Optional
 
 import requests
@@ -8,12 +8,19 @@ from aurelian.utils.doi_fetcher import DOIFetcher
 
 BIOC_URL = "https://www.ncbi.nlm.nih.gov/research/bionlp/RESTful/pmcoa.cgi/BioC_xml/{pmid}/ascii"
 PUBMED_EUTILS_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id={pmid}&retmode=xml"
-EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id={pmid}&retmode=xml"
+EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
 DOI_PATTERN = r"/(10\.\d{4,9}/[\w\-.]+)"
+NCBI_API_KEY = os.environ.get("NCBI_API_KEY")
 
 doi_fetcher = DOIFetcher()
 
+def _add_api_key(params: dict) -> dict:
+    """If NCBI_API_KEY is set, inject it into the request parameters."""
+    if NCBI_API_KEY:
+        params = dict(params)  # copy to avoid mutating caller
+        params["api_key"] = NCBI_API_KEY
+    return params
 
 def extract_doi_from_url(url: str) -> Optional[str]:
     """Extracts the DOI from a given journal URL.
@@ -39,9 +46,12 @@ def doi_to_pmid(doi: str) -> Optional[str]:
         str: The corresponding PMID if found, otherwise an empty string.
 
     """
-    API_URL = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/?ids={doi}&format=json"
-    response = requests.get(API_URL).json()
-    records = response.get("records", [])
+    API_URL = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+    params = {"ids": doi, "format": "json"}
+    response = requests.get(API_URL, params=_add_api_key(params))
+    response.raise_for_status()
+    data = response.json()
+    records = data.get("records", [])
     pmid = records[0].get("pmid", None) if records else None
     return pmid
 
@@ -93,7 +103,8 @@ def get_pmid_from_pmcid(pmcid):
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
     params = {"db": "pmc", "id": pmcid.replace("PMC", ""), "retmode": "json"}  # Remove "PMC" prefix if included
 
-    response = requests.get(url, params=params)
+    response = requests.get(url, params=_add_api_key(params))
+    response.raise_for_status()
     data = response.json()
 
     # Extract PMID
@@ -104,7 +115,10 @@ def get_pmid_from_pmcid(pmcid):
             if item["idtype"] == "pmid":
                 return item["value"]
     except KeyError:
-        return "PMID not found"
+        print(f"PMID not found for PMCID {pmcid}")
+    except Exception as e:
+        print(f"Error fetching PMID for PMCID {pmcid}: {e}")
+    return None # key fix, if there is no match, return None
 
 
 def get_pmcid_text(pmcid: str) -> str:
@@ -122,6 +136,8 @@ def get_pmcid_text(pmcid: str) -> str:
 
     """
     pmid = get_pmid_from_pmcid(pmcid)
+    if not pmid:
+        return f"PMID not found for {pmcid}"
     return get_pmid_text(pmid)
 
 
@@ -158,8 +174,10 @@ def get_pmid_text(pmid: str) -> str:
 def pmid_to_doi(pmid: str) -> Optional[str]:
     if ":" in pmid:
         pmid = pmid.split(":")[1]
-    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id={pmid}&retmode=json"
-    response = requests.get(url)
+    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+    params = {"db": "pubmed", "id": pmid, "retmode": "json"}
+    response = requests.get(url, params=_add_api_key(params))
+    response.raise_for_status()
     data = response.json()
 
     try:
@@ -220,7 +238,8 @@ def get_abstract_from_pubmed(pmid: str) -> str:
         The title and abstract text if available, otherwise an empty string.
 
     """
-    response = requests.get(EFETCH_URL.format(pmid=pmid))
+    params = {"db": "pubmed", "id": pmid, "retmode": "xml"}
+    response = requests.get(EFETCH_URL.format(pmid=pmid), params=_add_api_key(params))
 
     if response.status_code != 200:
         return ""
