@@ -8,7 +8,7 @@ import json
 import gradio as gr
 
 from aurelian.utils.async_utils import run_sync
-from .hpoa_agent import hpoa_agent, call_agent_with_retry
+from .hpoa_agent import hpoa_agent, call_agent_with_retry, reset_tool_log, get_tool_log
 from .hpoa_config import HPOADependencies
 
 
@@ -26,7 +26,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
     if deps is None:
         deps = HPOADependencies()
 
-    def get_info(query: str, history: List[str]) -> str:
+    def get_info(query: str, history: List[str]):
         # Keep it stateless and fast; still log incoming history for debugging
         # Gradio will render Markdown/newlines in the returned string
         print(f"QUERY: {query}")
@@ -35,9 +35,15 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
         except Exception:
             pass
         try:
+            # Reset tool log for this turn
+            reset_tool_log()
             # Use the retrying runner defined in hpoa_agent.py
             result = call_agent_with_retry(query)
             data = result.output
+            # Prepare a reasoning/tool trace block first
+            trace = get_tool_log()
+            if trace:
+                yield f"Reasoning trace (tools):\n\n```json\n{json.dumps(trace, indent=2)}\n```"
             # Prefer conversational text; append a copyable JSON block when annotations are present
             if hasattr(data, "model_dump"):
                 dd = data.model_dump()
@@ -48,14 +54,18 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
                         "explanation": (text or ""),
                         "annotations": ann,
                     }, indent=2)
-                    return f"{text}\n\n```json\n{block}\n```"
-                return text if text else json.dumps(dd, indent=2)
+                    yield f"{text}\n\n```json\n{block}\n```"
+                    return
+                yield text if text else json.dumps(dd, indent=2)
+                return
             if isinstance(data, (dict, list)):
                 # Fallback: pretty print dicts/lists, which Gradio will render with newlines
-                return json.dumps(data, indent=2)
-            return str(data)
+                yield json.dumps(data, indent=2)
+                return
+            yield str(data)
+            return
         except Exception as e:
-            return f"Error calling agent: {e}"
+            yield f"Error calling agent: {e}"
 
     return gr.ChatInterface(
         fn=get_info,

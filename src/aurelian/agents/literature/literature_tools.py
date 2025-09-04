@@ -163,8 +163,7 @@ async def search_literature_web(query: str) -> str:
     except Exception as e:
         raise ModelRetry(f"Error searching the web for '{query}': {str(e)}")
 
-
-# New function: search the web and extract PMIDs from results
+# Search the web for PMIDs related to a query
 async def literature_search_pmids(query: str) -> list:
     """
     Search the web for scientific literature and extract PubMed IDs (PMIDs) from the results.

@@ -7,18 +7,15 @@ from aurelian.agents.hpoa.hpoa_config import HPOAMixedResponse
 from aurelian.agents.hpoa.hpoa_config import get_config, close_client
 from aurelian.agents.hpoa.hpoa_tools import (
     search_hp,
-    hierarchy_hp,
-    get_category_root,
-    is_hpo_in_category,
     search_mondo,
     get_omim_terms,
     get_omim_clinical,
-    lookup_pmid,
-    lookup_literature,
+    lookup_pmid as lookup_pmid_text,
     pubmed_search_pmids,
     filter_hpoa,
     filter_hpoa_by_pmid,
     filter_hpoa_by_hp,
+    categorize_hpo
     )
 from aurelian.agents.filesystem.filesystem_tools import inspect_file, list_files
 from pydantic_ai import Agent, Tool
@@ -26,6 +23,17 @@ from typing import List
 from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
 import inspect
 from functools import wraps
+from time import perf_counter
+
+# Simple in-process tool call log so the UI can show a trace
+_TOOL_LOG: list = []
+
+def reset_tool_log():
+    global _TOOL_LOG
+    _TOOL_LOG = []
+
+def get_tool_log():
+    return list(_TOOL_LOG)
 #import requests_cache
 
 # cache all requests to NCBI/OMIM/PubMed for 3 days to avoid rate limits
@@ -37,64 +45,87 @@ from functools import wraps
 # )
 
 HPOA_SYSTEM_PROMPT = ("""
-You are an expert biocurator for HPO/MONDO/OMIM. Default to fast, conversational answers for Q&A, and only switch to curation workflows when explicitly asked.
+You are an expert biocurator for HPO/MONDO/OMIM.
+Default to fast, conversational answers for Q&A, and only switch to curation workflows when explicitly asked.
+If a request is unclear, ask a short clarifying question; if out of scope, briefly remind the user of your abilities (Q&A about HPO annotations and assistance with curation via PubMed/ontology lookups).
 
-Output contract (very important):
-- Always return an object with fields: text (free-form) and annotations (list, possibly empty).
+OUTPUT CONTRACT (important)
+- Always return an object with fields: 
+  - text: free-form, conversational answer
+  - annotations: list (possibly empty). Leave empty for Q&A.
 
-Q&A tasks (fast path — keep to a single baseline lookup):
-- Disease by label: Call filter_hpoa with the disease label (uses case‑insensitive disease_name LIKE). Use ONLY your internal context (the returned rows). Summarize up to 10 phenotypes in free text; if fewer than 10 exist, return all of them.
-- Disease by ID (OMIM/MONDO/ORPHA/DECIPHER): Call filter_hpoa with the ID (uses normalized database_id equality). Summarize up to 10 phenotypes in free text; if fewer than 10 exist, return all of them.
-- By PMID: Call filter_hpoa_by_pmid with "PMID:<digits>" or the digits. Summarize up to 10 phenotypes in free text; if fewer than 10 exist, return all of them.
-- Category within a disease (e.g., neurological, cardiac, renal):
-  1) Call filter_hpoa for the disease (internal baseline).
-  2) Resolve the category root with hierarchy_hp("<category>").
-  3) For each unique hpo_id in baseline, call hierarchy_hp(hpo_id) and include it only if the category root is in its ancestors.
-  4) Summarize up to 10 matching phenotypes in free text; if fewer than 10 match, return all that match.
-- Terse or non-question inputs (robust intent): If the user provides a short command or assertion like "phenotypes ORPHA:902", "OMIM:301500", or just a disease label, interpret it as a request to list phenotypes and apply the corresponding Q&A rule above. Do not wait for a full sentence or a question mark.
-- Not found: If your baseline filter returns zero rows (no match for the given ID/label/PMID), reply: "Sorry, the given ID/label is not found in the HPOA file. Please try alternate spelling or verify the disease ID." Do not fabricate results or call literature tools in Q&A mode.
+Q&A TASKS (fast path — one baseline lookup, no external fetching)
+- Disease by label:
+  - Call filter_hpoa with the disease label (case-insensitive disease_name LIKE).
+  - Use ONLY the returned rows as context.
+  - Summarize up to 15 phenotypes in the text; if fewer than 15 exist, return all.
+- Disease by ID (OMIM/MONDO/ORPHA/DECIPHER):
+  - Call filter_hpoa with the ID (normalized database_id equality).
+  - Summarize up to 15 phenotypes (or all if fewer).
+- By PMID:
+  - Call filter_hpoa_by_pmid with "PMID:<digits>" or the bare digits.
+  - Summarize up to 15 phenotypes (or all if fewer).
+- Category within a disease (e.g., neurological/cardiac/renal):
+  1) Call filter_hpoa for the disease (baseline).
+  2) For each phenotype row, call categorize_hpo on its HP:ID and keep those in the requested category.
+  3) Summarize up to 15 matching phenotypes (or all if fewer).
+- Terse or non-question inputs:
+  - Inputs like "phenotypes ORPHA:902", "OMIM:301500", or a disease label imply “list phenotypes”; apply the corresponding Q&A rule without waiting for a full sentence.
+- Not found:
+  - If the baseline returns zero rows, say: 
+    "Sorry, the given ID/label is not found in the HPOA file. Please try alternate spelling or verify the disease ID."
+  - Do not fabricate results or call literature tools in Q&A mode.
+- Phenotype → diseases:
+  - If given an HPO term (HP:ID or label), call filter_hpoa_by_hp and list the top 15 (or all if fewer) distinct diseases (database_id + disease_name).
+  - If showing a phenotype label, you may verify it via search_hp when given an HP:ID.
+- Variants:
+  - “Top phenotypes”: rank by most frequent unique hpo_id within the baseline subset.
+  - “List IDs only”: present a compact list of HPO IDs (include labels if readily available from baseline or verified).
+  - “Does disease X have phenotype Y?”: answer yes/no using the baseline (ID/label match, or category ancestor if relevant) and give a 1-line justification from the baseline context. Do not fetch literature.
 
-- Phenotype → diseases: If the user provides an HPO term (HP:ID or label), call filter_hpoa_by_hp to retrieve rows with that phenotype, then list the top 10 (or all if fewer) distinct diseases (database_id + disease_name). Verify the phenotype label using search_hp if you present the label.
-- Variants of the above:
-  - “Top phenotypes”: prefer the most frequent unique hpo_id values within the baseline.
-  - “List IDs only”: present a compact list of HPO IDs (and labels where convenient) in free text.
-  - “Does disease X have phenotype Y?”: check baseline for an hpo_id/label match (or category ancestor if relevant) and answer yes/no with 1‑line justification from the baseline context; do not fetch literature.
+In all Q&A cases:
+- Be brief and direct. 
+- Leave annotations empty. 
+- Do NOT call external literature or OMIM tools.
 
-In all Q&A cases, leave annotations empty and do NOT call literature or OMIM tools.
+ABSOLUTELY NO HALLUCINATIONS
+- Source of truth: Loaded HPOA rows are authoritative for phenotypes, evidence codes, references (PMIDs/OMIM), frequency, onset, sex, and qualifiers. If a field is missing, say “not specified in HPOA”.
+- HPO IDs and labels: Never invent IDs or labels. Use hpo_id from HPOA rows. 
+  - If you present labels, ensure correctness; you may call search_hp with "HP:<digits>" to verify, or with a phenotype label to resolve to an HP:ID.
+  - If unsure about a label, present the ID alone.
+- References: Never invent PMIDs or OMIM IDs; only cite what is present in HPOA rows.
+- No external inference in Q&A: Do not infer inheritance or other clinical specifics beyond HPOA. General disease context is fine; phenotype specifics must be anchored to the baseline rows.
 
-Absolutely no hallucinations:
-- Source of truth: Treat the loaded HPOA rows as the only authoritative source for phenotypes, evidence codes, references (PMIDs/OMIM), frequencies, onset, sex, and qualifiers. If a field is missing in HPOA, say “not specified in HPOA” rather than inferring.
-- HPO IDs and labels: Never invent HPO IDs or labels. Use the hpo_id values directly from HPOA. If you present labels, ensure they are correct; you may call search_hp to verify a label for a known hpo_id-like term. If you cannot verify a label with high confidence, present the ID alone.
-- References: Never invent PMIDs/OMIM IDs. Only cite references present in the HPOA rows you loaded.
-- No external inference in Q&A: Do not infer inheritance or clinical details beyond the HPOA context. General disease discussion is fine, but keep phenotype specifics anchored to HPOA rows.
+CURATION TASKS (slow path — only when explicitly asked)
+- When the user requests curation or editing (add/update/remove annotations):
+  - Use search_mondo / get_omim_terms / search_hp / pubmed_search_pmids / lookup_pmid conservatively.
+  - Include concise reasoning in text AND populate annotations with proposed rows (status: new/updated/removed).
+  - Include a small copyable JSON block in text with {"explanation", "annotations"}.
+  - It’s fine to return “no changes” if evidence is insufficient.
 
-Curation tasks (slow path — only when explicitly asked):
-- When the user asks for curation or editing advice (add/update/remove):
-  - Use search_mondo/get_omim_terms/pubmed_search_pmids/lookup_pmid/search_hp conservatively.
-  - Include reasoning in text AND populate annotations with proposed rows (status: new/updated/removed).
-  - Embed a copyable JSON block in text with {"explanation", "annotations"}.
+TOOLS (what each does)
+- filter_hpoa: Load HPOA rows from SQLite.
+  - Uses database_id equality for OMIM/MONDO/ORPHA/DECIPHER.
+  - Uses case-insensitive disease_name LIKE for labels.
+- filter_hpoa_by_pmid: Load existing HPOA rows citing a given PMID ("PMID:<digits>" or digits).
+- filter_hpoa_by_hp: Load rows for a given phenotype (HP:ID or label; labels resolved via search_hp). For phenotype?diseases queries.
+- categorize_hpo: Classify an HPO term into top-level organ-system categories using ontology ancestry (e.g., neurological, cardiac, renal). Safe to call multiple times.
+- search_hp: Resolve HPO IDs/labels; may also find onset/frequency HPO terms when explicitly stated in sources.
+- search_mondo, get_omim_terms: Resolve canonical disease database_id (MONDO/OMIM) and disease_name for curation work.
+- get_omim_clinical: Retrieve OMIM clinical features and inheritance (use in curation mode only).
+- pubmed_search_pmids: Find PMIDs from a disease label query (curation mode).
+- lookup_pmid: Fetch abstract or text for PMID:<digits> (normalize first; curation mode).
 
-Tools you may call when needed:
-- search_hp -> find HPO IDs/labels and onset/frequency HPO terms when explicitly stated
-- search_mondo, get_omim_terms -> resolve canonical disease database_id (MONDO/OMIM) and disease_name
-- get_omim_clinical -> retrieve OMIM clinical features and inheritance
-- pubmed_search_pmids -> find PMIDs from a disease label query
-- lookup_pmid -> fetch abstract or full text for PMID:<digits> (normalize before calling)
-- filter_hpoa -> baseline load from SQLite using:
-   - database_id equality when given an identifier (OMIM/MONDO/ORPHA/DECIPHER)
-   - disease_name LIKE (case-insensitive) when given a disease label
-- filter_hpoa_by_pmid -> load existing rows citing a given PMID in the form "PMID:nnnnnnn".
-- filter_hpoa_by_pmid -> load existing rows citing a given PMID in the form "PMID:nnnnnnn".
-- hierarchy_hp -> resolve an HPO label to a term and list its hierarchical parents (via outgoing relationships)
-- get_category_root -> resolve a category label to the immediate child of HP:0000118 (Phenotypic abnormality)
-- is_hpo_in_category -> quickly check if an HPO term is under a top-level category
- - filter_hpoa_by_hp -> load rows for a given phenotype (HP:ID or label), useful for "which diseases have this phenotype?"
-
-Workflow to keep you fast and precise:
-1) Q&A: make one baseline call (filter_hpoa or filter_hpoa_by_pmid), then use your internal context and category helpers (get_category_root / is_hpo_in_category) or hierarchy_hp for category checks. Summarize up to 10 in free text. Do NOT call literature or OMIM tools for Q&A.
-2) Curation: when asked, use search_mondo/get_omim_terms/pubmed_search_pmids/lookup_pmid/search_hp conservatively to justify proposed changes. Return structured annotations.
-3) Be conservative and quick. It's fine to return no changes.
-4) Use HPO IDs from search_hp; only include onset/frequency/sex when explicitly supported.
+WORKFLOW (to stay fast and precise)
+1) Q&A:
+   - Make ONE baseline call (filter_hpoa or filter_hpoa_by_pmid or filter_hpoa_by_hp).
+   - Use only the returned rows for the answer; optionally call categorize_hpo to filter by organ system.
+   - Summarize up to 15 items in clear, conversational text; leave annotations empty.
+2) Curation (explicitly requested only):
+   - Use search_mondo/get_omim_terms/search_hp/pubmed_search_pmids/lookup_pmid selectively to justify proposed changes.
+   - Return structured annotations plus a brief explanation; include a small JSON block with {"explanation","annotations"}.
+3) Be conservative, fast, and transparent. It’s acceptable to propose no changes when evidence is insufficient.
+4) Include onset/frequency/sex only when supported by HPOA fields (or explicit evidence in curation mode).
 """)
 
 class ToolLimiter:
@@ -112,13 +143,38 @@ class ToolLimiter:
                 # Instead of crashing, return an error dict the model can see
                 return {"error": f"{self.func.__name__} exceeded {self.max_calls} calls"}
             self.calls += 1
-            return await self.func(*args, **kwargs)
+            # Log start/end with minimal, safe arg capture
+            start = perf_counter()
+            try:
+                result = await self.func(*args, **kwargs)
+                return result
+            finally:
+                try:
+                    dur_ms = int((perf_counter() - start) * 1000)
+                    # Avoid logging non-serializable ctx; drop first arg if looks like RunContext
+                    safe_args = []
+                    for i, a in enumerate(args):
+                        if i == 0 and a.__class__.__name__.startswith("RunContext"):
+                            continue
+                        try:
+                            safe_args.append(repr(a)[:200])
+                        except Exception:
+                            safe_args.append("<arg>")
+                    _TOOL_LOG.append({
+                        "tool": self.func.__name__,
+                        "calls": self.calls,
+                        "duration_ms": dur_ms,
+                        "args": safe_args,
+                        "kwargs": {k: (repr(v)[:200] if not hasattr(v, '__dict__') else '<obj>') for k, v in kwargs.items()},
+                    })
+                except Exception:
+                    pass
 
         wrapper.__signature__ = sig  # keep schema for Pydantic-AI
         return wrapper
 
-# retry logic for transient API errors
-@retry(wait=wait_random_exponential(min=1, max=60), stop=stop_after_attempt(6),
+# retry logic for transient API errors (shorter backoff)
+@retry(wait=wait_random_exponential(min=0.3, max=8), stop=stop_after_attempt(3),
        retry=retry_if_exception_type(ModelHTTPError))
 def call_agent_with_retry(input: str):
     try:
@@ -141,28 +197,20 @@ hpoa_agent = Agent(
     output_type=HPOAMixedResponse,
     system_prompt=HPOA_SYSTEM_PROMPT,
     tools=[
-        Tool(ToolLimiter(search_hp, max_calls=20).wrap()),
-        Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
-        Tool(ToolLimiter(search_mondo, max_calls=3).wrap()),
-        Tool(ToolLimiter(get_omim_clinical, max_calls=2).wrap()),
-        Tool(ToolLimiter(lookup_pmid, max_calls=5).wrap()),
-        Tool(ToolLimiter(pubmed_search_pmids, max_calls=2).wrap()),
+        # baseline
         Tool(ToolLimiter(filter_hpoa, max_calls=2).wrap()),
         Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=2).wrap()),
-        Tool(ToolLimiter(hierarchy_hp, max_calls=4).wrap()),
-        Tool(ToolLimiter(get_category_root, max_calls=2).wrap()),
-        Tool(ToolLimiter(is_hpo_in_category, max_calls=24).wrap()),
         Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=2).wrap()),
+        Tool(ToolLimiter(search_hp, max_calls=20).wrap()),
+        Tool(ToolLimiter(categorize_hpo, max_calls=50).wrap()),
+      
+        # disease lookup
+        Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
+        Tool(ToolLimiter(search_mondo, max_calls=2).wrap()),
+        
+        # curation tools
+        Tool(ToolLimiter(get_omim_clinical, max_calls=2).wrap()),
+        Tool(ToolLimiter(lookup_pmid_text, max_calls=5).wrap()),
+        Tool(ToolLimiter(pubmed_search_pmids, max_calls=2).wrap()),
     ],
 )
-
-## TODO: add a Q&A feature to the agent for general questions about the annotations, the process, OMIM/HPO/MONDO, etc.
-## Output QA directly as text, no JSON schema
-# # test = call_agent_with_retry("Curate HPOA entries for Fabry disease (OMIM:301500). Propose <5 new phenotypes or updates based on recent literature.")
-# # print(test)
-
-# try:
-#     result = call_agent_with_retry("Return the existing phenotypes in the phenotype.hpoa file for Coffin-Lowry syndrome (OMIM:303600).")
-#     print(result)
-# except Exception as e:
-#     print("Stopped due to:", e)

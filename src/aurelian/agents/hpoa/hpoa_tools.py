@@ -13,56 +13,105 @@ from aurelian.agents.literature.literature_tools import (
     literature_search_pmids as literature_search_pmids,
     )
 from oaklib.datamodels.search import SearchConfiguration
+import inspect as _inspect
 
-# Simple in-memory caches to speed up oaklib calls within a run
-_HP_LABEL_CACHE: Dict[str, Optional[str]] = {}
-_HP_ANCESTORS_CACHE: Dict[str, List[str]] = {}
-_HP_OUTGOING_CACHE: Dict[str, List[tuple]] = {}
-_HP_CHILDREN_CACHE: Dict[str, List[str]] = {}
-_CATEGORY_LABEL_TO_ID: Dict[str, str] = {}
+async def search_hp(ctx: RunContext[HPOADependencies], term: str) -> List[dict]:
+    """Search the HPO for phenotypic abnormalities by ID or label.
 
-CATEGORY_ROOT = "HP:0000118"  # Phenotypic abnormality
-
-async def search_hp(ctx: RunContext[HPOADependencies], label: str) -> List[dict]:
-    """Search the HPO for phenotypic abnormalities, qualifiers, or frequencies."""
+    - If `term` starts with "HP:", normalize and return that term (id/label/definition).
+    - Otherwise, run a basic partial label search and return HP terms.
+    """
 
     config = ctx.deps or get_config()
     hp = config.get_hp_adapter()
-    results = list(hp.basic_search(label, SearchConfiguration(is_partial=True)))
-    data = []
-    for curie in results:
-        if not curie.startswith("HP:"):
+
+    q = (term or "").strip()
+    if not q:
+        return []
+
+    # Direct ID lookup
+    if q.lower().startswith("hp:"):
+        curie = q.upper()
+        try:
+            return [{
+                "id": curie,
+                "label": hp.label(curie),
+                "definition": hp.definition(curie),
+            }]
+        except Exception:
+            return [{"id": curie, "label": None, "definition": None}]
+
+    # Label search
+    try:
+        bs = hp.basic_search(q, SearchConfiguration(is_partial=True))
+        if _inspect.iscoroutine(bs):
+            bs = await bs
+        found = list(bs)
+    except Exception:
+        found = []
+
+    results: List[dict] = []
+    for curie in found:
+        if not isinstance(curie, str) or not curie.startswith("HP:"):
             continue
-        data.append({
+        try:
+            results.append({
                 "id": curie,
                 "label": hp.label(curie),
                 "definition": hp.definition(curie),
             })
-    return data
+        except Exception:
+            results.append({"id": curie, "label": None, "definition": None})
+    return results
 
-async def search_mondo(ctx: RunContext[HPOADependencies], label: str) -> List[dict]:
-    """Search the MONDO Ontology for disease identifiers."""
+async def search_mondo(ctx: RunContext[HPOADependencies], term: str) -> List[dict]:
+    """Search the MONDO ontology by ID or label.
+
+    - If `term` starts with "MONDO:", normalize and return that term (id/label/definition).
+    - Otherwise, run a basic partial label search and return MONDO terms.
+    """
 
     config = ctx.deps or get_config()
     mondo = config.get_mondo_adapter()
 
-    HUMAN_DISEASE_ROOT = "MONDO:0700096"
+    q = (term or "").strip()
+    if not q:
+        return []
 
-    def is_human_disease(curie: str) -> bool:
-        ancestors = set(mondo.ancestors(curie))
-        return HUMAN_DISEASE_ROOT in ancestors
+    # Direct ID lookup
+    if q.lower().startswith("mondo:"):
+        curie = q.upper()
+        try:
+            return [{
+                "id": curie,
+                "label": mondo.label(curie),
+                "definition": mondo.definition(curie),
+            }]
+        except Exception:
+            return [{"id": curie, "label": None, "definition": None}]
 
-    results = list(mondo.basic_search(label, SearchConfiguration(is_partial=True)))
-    data = []
-    for curie in results:
-        if not is_human_disease(curie):
+    # Label search
+    try:
+        bs = mondo.basic_search(q, SearchConfiguration(is_partial=True))
+        if _inspect.iscoroutine(bs):
+            bs = await bs
+        found = list(bs)
+    except Exception:
+        found = []
+
+    results: List[dict] = []
+    for curie in found:
+        if not isinstance(curie, str) or not curie.startswith("MONDO:"):
             continue
-        data.append({
-            "id" : curie,
-            "label" : mondo.label(curie),
-            "definition": mondo.definition(curie),
-        })
-    return data
+        try:
+            results.append({
+                "id": curie,
+                "label": mondo.label(curie),
+                "definition": mondo.definition(curie),
+            })
+        except Exception:
+            results.append({"id": curie, "label": None, "definition": None})
+    return results
 
 async def get_omim_terms(ctx: RunContext[HPOADependencies], label: str):
     """Search the OMIM DB for disease identifiers (async httpx)."""
@@ -208,7 +257,7 @@ async def lookup_pmid(pmid: str) -> str:
 
 async def lookup_literature(query: str) -> List[str]:
     """
-    Search PubMed for PMIDs matching a text query.
+    Search the Web for PMIDs matching a text query.
     Args:
         query: The search query
         
@@ -217,37 +266,33 @@ async def lookup_literature(query: str) -> List[str]:
     """
     return await literature_search_pmids(query)
 
-
-# Alias for compatibility with hpoa_agent import
-async def pubmed_search_pmids(query: str) -> List[str]:
-    return await literature_search_pmids(query)
-
-
 async def filter_hpoa_by_hp(ctx: RunContext[HPOADependencies], hp: str) -> List[HPOA]:
     """
     Return all phenotype.hpoa rows that have a given HPO term in `hpo_id`.
 
-    Accepts either "HP:nnnnnnn" or a label; labels are resolved to an HP ID via
-    an ontology search.
+    Accepts either an HP:ID (e.g., "HP:0001250") or a phenotype label.
+    If a label is provided, resolves to the top HP:ID via search_hp.
     """
     config = ctx.deps or get_config()
     await config.ensure_hpoa_db()
-
-    hp_norm = hp.strip()
-    # If not an HP:ID, attempt resolution via adapter search
-    if not hp_norm.upper().startswith("HP:"):
+    raw = hp.strip()
+    # Resolve label to HP:ID if needed
+    if not raw.upper().startswith("HP:"):
         try:
-            hp_adapter = config.get_hp_adapter()
-            resolved = await _resolve_hp_term_by_label(hp_adapter, hp_norm)
-            if resolved:
-                hp_norm = resolved
+            matches = await search_hp(ctx, raw)
+            if not matches:
+                return []
+            hp_norm = (matches[0].get("id") or "").upper()
         except Exception:
-            pass
+            return []
+    else:
+        hp_norm = raw.upper()
 
     con = sqlite3.connect(config.hpoa_db_path)
     con.row_factory = sqlite3.Row
     try:
         cur = con.cursor()
+        # Fast normalized equality on HPO IDs
         cur.execute("SELECT * FROM hpoa WHERE UPPER(hpo_id) = ?", (hp_norm.upper(),))
         rows = [dict(r) for r in cur.fetchall()]
     finally:
@@ -260,193 +305,6 @@ async def filter_hpoa_by_hp(ctx: RunContext[HPOADependencies], hp: str) -> List[
         except Exception as e:
             print(f"Skipping row due to error: {e}")
     return results
-
-
-async def hierarchy_hp(ctx: RunContext[HPOADependencies], label: str) -> Dict[str, Any]:
-    """
-    Given an HPO label or CURIE, resolve to a term and return its immediate
-    hierarchical parents via outgoing relationships, plus basic metadata and
-    the transitive ancestor set.
-
-    Returns:
-      {
-        "id": HP:xxxxx,
-        "label": <label>,
-        "parents": [
-            {"rel": <CURIE>, "rel_label": <label>, "parent": <HP:xxxx>, "parent_label": <label>}, ...
-        ]
-        "ancestors": [HP:xxxx, ...]
-      }
-    """
-    config = ctx.deps or get_config()
-    hp = config.get_hp_adapter()
-
-    # Accept either CURIE or label
-    term_id = label.strip() if label.strip().upper().startswith("HP:") else await _resolve_hp_term_by_label(hp, label)
-    if term_id is None:
-        return {"error": f"No HPO term found for label '{label}'"}
-
-    parents: List[Dict[str, str]] = []
-    try:
-        for rel, parent in _hp_outgoing(hp, term_id):
-            try:
-                parents.append({
-                    "rel": rel,
-                    "rel_label": _hp_label(hp, rel),
-                    "parent": parent,
-                    "parent_label": _hp_label(hp, parent),
-                })
-            except Exception:
-                parents.append({
-                    "rel": rel,
-                    "rel_label": None,
-                    "parent": parent,
-                    "parent_label": None,
-                })
-    except Exception as e:
-        return {"id": term_id, "label": _hp_label(hp, term_id), "parents": [], "ancestors": [], "warning": f"relationships error: {e}"}
-
-    # Transitive ancestors for quick category checks (e.g., neurological root)
-    try:
-        ancestors = _hp_ancestors(hp, term_id)
-    except Exception:
-        ancestors = []
-
-    return {"id": term_id, "label": _hp_label(hp, term_id), "parents": parents, "ancestors": ancestors}
-
-
-async def get_category_root(ctx: RunContext[HPOADependencies], category_label: str) -> Dict[str, Any]:
-    """Resolve a top-level category under HP:0000118 (Phenotypic abnormality).
-
-    Tries to match the label against the immediate children of HP:0000118.
-    Returns {id, label}. If not found, returns {error}.
-    """
-    config = ctx.deps or get_config()
-    hp = config.get_hp_adapter()
-    key = category_label.strip().lower()
-    if key in _CATEGORY_LABEL_TO_ID:
-        cid = _CATEGORY_LABEL_TO_ID[key]
-        return {"id": cid, "label": _hp_label(hp, cid)}
-
-    # Fetch immediate children of the category root (cache)
-    try:
-        children = _hp_children(hp, CATEGORY_ROOT)
-    except Exception:
-        children = []
-
-    # Try exact label match among children
-    for cid in children:
-        lab = (_hp_label(hp, cid) or "").strip().lower()
-        if lab and (lab == key or key in lab):
-            _CATEGORY_LABEL_TO_ID[key] = cid
-            return {"id": cid, "label": _hp_label(hp, cid)}
-
-    # Fallback: resolve via general label search and then map to nearest category ancestor
-    term = await _resolve_hp_term_by_label(hp, category_label)
-    if term:
-        # find first ancestor that is an immediate child of CATEGORY_ROOT
-        try:
-            anc = set(_hp_ancestors(hp, term))
-            for cid in children:
-                if cid in anc or term == cid:
-                    _CATEGORY_LABEL_TO_ID[key] = cid
-                    return {"id": cid, "label": _hp_label(hp, cid)}
-        except Exception:
-            pass
-
-    return {"error": f"No category root found for '{category_label}' under {CATEGORY_ROOT}"}
-
-
-async def is_hpo_in_category(ctx: RunContext[HPOADependencies], hpo_id: str, category_label: str) -> bool:
-    """Check if a given HPO term is under a top-level category (immediate child of HP:0000118)."""
-    config = ctx.deps or get_config()
-    hp = config.get_hp_adapter()
-    root = await get_category_root(ctx, category_label)
-    cid = root.get("id") if isinstance(root, dict) else None
-    if not cid:
-        return False
-    if hpo_id == cid:
-        return True
-    try:
-        return cid in set(_hp_ancestors(hp, hpo_id))
-    except Exception:
-        return False
-
-
-async def _resolve_hp_term_by_label(hp_adapter, label: str) -> Optional[str]:
-    """Resolve an HPO label to a CURIE using oaklib search, preferring exact matches."""
-    # Try exact label match by scanning results
-    try:
-        # First: non-partial search may behave like exact or broader depending on adapter
-        results = list(hp_adapter.basic_search(label, SearchConfiguration(is_partial=False)))
-    except Exception:
-        results = []
-    if not results:
-        try:
-            results = list(hp_adapter.basic_search(label, SearchConfiguration(is_partial=True)))
-        except Exception:
-            results = []
-
-    # Prefer HP: terms and where label matches case-insensitively
-    lc = label.strip().lower()
-    hp_terms = [curie for curie in results if isinstance(curie, str) and curie.startswith("HP:")]
-    for curie in hp_terms:
-        try:
-            if (_hp_label(hp_adapter, curie) or "").strip().lower() == lc:
-                return curie
-        except Exception:
-            pass
-    # fallback to first HP term
-    if hp_terms:
-        return hp_terms[0]
-    return None
-
-
-def _hp_label(hp_adapter, curie: str) -> Optional[str]:
-    if curie in _HP_LABEL_CACHE:
-        return _HP_LABEL_CACHE[curie]
-    try:
-        val = hp_adapter.label(curie)
-    except Exception:
-        val = None
-    _HP_LABEL_CACHE[curie] = val
-    return val
-
-
-def _hp_ancestors(hp_adapter, curie: str) -> List[str]:
-    if curie in _HP_ANCESTORS_CACHE:
-        return _HP_ANCESTORS_CACHE[curie]
-    try:
-        vals = list(hp_adapter.ancestors(curie))
-    except Exception:
-        vals = []
-    _HP_ANCESTORS_CACHE[curie] = vals
-    return vals
-
-
-def _hp_outgoing(hp_adapter, curie: str) -> List[tuple]:
-    if curie in _HP_OUTGOING_CACHE:
-        return _HP_OUTGOING_CACHE[curie]
-    try:
-        vals = list(hp_adapter.outgoing_relationships(curie))
-    except Exception:
-        vals = []
-    _HP_OUTGOING_CACHE[curie] = vals
-    return vals
-
-
-def _hp_children(hp_adapter, curie: str) -> List[str]:
-    if curie in _HP_CHILDREN_CACHE:
-        return _HP_CHILDREN_CACHE[curie]
-    vals: List[str] = []
-    # Try adapter.children if available; fallback to scan outgoing relationships of all terms is too heavy, so skip
-    try:
-        if hasattr(hp_adapter, "children"):
-            vals = list(hp_adapter.children(curie))  # type: ignore[attr-defined]
-    except Exception:
-        vals = []
-    _HP_CHILDREN_CACHE[curie] = vals
-    return vals
 
 async def pubmed_search_pmids(ctx: RunContext[HPOADependencies], query: str, retmax: int = 20) -> list:
     """
@@ -491,3 +349,44 @@ async def pubmed_search_pmids(ctx: RunContext[HPOADependencies], query: str, ret
     pmids = [f"PMID:{p}" for p in pmids]
 
     return pmids
+
+# Helper functions for dealing with HPO hierarchy
+HP_SYSTEM_ROOT = "HP:0000118"  # Phenotypic abnormality
+
+def children_of(ctx: RunContext[HPOADependencies], parent: str) -> List[str]:
+    """Direct children = subjects of subclass edges pointing to parent.
+
+    Note: synchronous helper (no awaiting needed).
+    """
+    config = ctx.deps or get_config()
+    hp = config.get_hp_adapter()
+    try:
+        return [s for s, p, o in hp.relationships(objects=[parent])]
+    except Exception:
+        return []
+
+def parents_of(ctx: RunContext[HPOADependencies], child: str) -> List[str]:
+    """Direct parents = objects of subclass edges from child.
+
+    Note: synchronous helper (no awaiting needed).
+    """
+    config = ctx.deps or get_config()
+    hp = config.get_hp_adapter()
+    try:
+        return [o for s, p, o in hp.relationships(subjects=[child])]
+    except Exception:
+        return []
+
+async def categorize_hpo(ctx: RunContext[HPOADependencies], term: str) -> List[str]:
+    """
+    Categorize a term into top-level systems under HP:0000118.
+    Returns list like: ["HP:xxxxxxx | Label", ...].
+    """
+    config = ctx.deps or get_config()
+    hp = config.get_hp_adapter()
+    systems = children_of(ctx, HP_SYSTEM_ROOT)
+    try:
+        ancestors = set(hp.ancestors(term, reflexive=True) or [])
+    except Exception:
+        ancestors = set()
+    return [f"{s} | {hp.label(s)}" for s in systems if s in ancestors]

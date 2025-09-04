@@ -1,13 +1,10 @@
 """ Configuration file for HPOA Agent """
 from pydantic import BaseModel, Field
 from dataclasses import dataclass, field
-import os, csv, subprocess, sqlite3
+import os, csv, sqlite3
 from io import StringIO
 from typing import cast
-try:
-    import pandas as pd  # type: ignore
-except Exception:  # pragma: no cover
-    pd = None  # fallback to csv module
+import pandas as pd
 import httpx
 from typing import Optional, List, Dict, Any, TypedDict, Literal
 from oaklib import get_adapter
@@ -15,6 +12,10 @@ from oaklib.interfaces import BasicOntologyInterface
 from datetime import date
 
 from aurelian.dependencies.workdir import HasWorkdir, WorkDir
+
+# Module-level singletons for ontology adapters to avoid repeated loads
+_HP_ADAPTER_SINGLETON: Optional[BasicOntologyInterface] = None
+_MONDO_ADAPTER_SINGLETON: Optional[BasicOntologyInterface] = None
 
 class HPOA(BaseModel):
     database_id: str = Field(..., description="Refers to the database `disease_name` is drawn from. Must be formatted as a CURIE, e.g., OMIM:1547800 or MONDO:0021190")
@@ -37,8 +38,8 @@ class HPOA(BaseModel):
                              default_factory = lambda: f"HPO:Agent[{date.today().isoformat()}]",description="""This refers to the biocurator who made the annotation and the date on which the annotation was made; the date format is YYYY-MM-DD. The first entry in this field refers to the creation date. Any additional biocuration is recorded following a semicolon. So, if Joseph curated on July 5, 2012, and Suzanna curated on December 7, 2015, one might have a field like this: HPO:Joseph[2012-07-05];HPO:Suzanna[2015-12-07]. It is acceptable to use ORCID ids.""")
 
 class HPOAResult(BaseModel):
-    status: Literal["existing", "new", "updated", "removed"] = Field(
-        ..., description="Whether this annotation was existing, new, updated, or suggested for removal from the phenotype.hpoa file."
+    status: Literal["new", "updated", "removed"] = Field(
+        ..., description="Whether this annotation was new, updated, or suggested for removal from the phenotype.hpoa file."
     )
     rationale: Optional[str] = None
     annotation: HPOA
@@ -93,27 +94,30 @@ class HPOADependencies(HasWorkdir):
 
     def get_mondo_adapter(self) -> BasicOntologyInterface:
         """Get a configured Mondo adapter."""
-        if self._mondo_adapter is None:
-            self._mondo_adapter = get_adapter("sqlite:obo:mondo")
-        return self._mondo_adapter
+        # Use module-level singleton to avoid reloading per instance
+        global _MONDO_ADAPTER_SINGLETON
+        if _MONDO_ADAPTER_SINGLETON is None:
+            _MONDO_ADAPTER_SINGLETON = get_adapter("sqlite:obo:mondo")
+        return _MONDO_ADAPTER_SINGLETON
         #return get_adapter("ontobee:mondo")
     
     def get_hp_adapter(self) -> BasicOntologyInterface:
         """Get a configured HPO adapter."""
-        if self._hp_adapter is None:
-            self._hp_adapter = get_adapter("sqlite:obo:hp")
-        return self._hp_adapter
+        # Use module-level singleton to avoid reloading per instance
+        global _HP_ADAPTER_SINGLETON
+        if _HP_ADAPTER_SINGLETON is None:
+            _HP_ADAPTER_SINGLETON = get_adapter("sqlite:obo:hp")
+        return _HP_ADAPTER_SINGLETON
         #return get_adapter("ontobee:hp")
     
     async def fetch_and_parse_hpoa(self, path: Optional[str] = None) -> List[Dict[str, str]]:
         """
         Load and parse phenotype.hpoa into a list of dicts.
 
-        Resolution order:
-        1) Explicit `path` argument if provided and exists
-        2) Env var `AURELIAN_HPOA_PATH` if set and exists
-        3) Cached file in workdir (if present): `${workdir}/phenotype.hpoa`
-        4) Download latest release from GitHub and cache to workdir
+        Simplified behavior:
+        - If `path` is provided and exists, load it.
+        - Else if `./phenotype.hpoa` exists in the current working directory, load it.
+        - Else download the latest `phenotype.hpoa` from GitHub and save it to the current working directory.
         """
         # 1) Explicit path
         candidate_path = path
@@ -127,33 +131,19 @@ class HPOADependencies(HasWorkdir):
                 self._persist_hpoa_to_db(rows)
                 return rows
 
-        # 2) Environment variable
-        env_path = os.environ.get("AURELIAN_HPOA_PATH")
-        if env_path and os.path.exists(env_path):
+        # 2) Local copy in current working directory
+        cwd_path = os.path.join(os.getcwd(), "phenotype.hpoa")
+        if os.path.exists(cwd_path):
             if pd is not None:
-                df = pd.read_csv(env_path, sep="\t", comment="#", dtype=str, keep_default_na=False)
+                df = pd.read_csv(cwd_path, sep="\t", comment="#", dtype=str, keep_default_na=False)
                 self._persist_df_to_db(df)
                 return cast(List[Dict[str, str]], df.to_dict("records"))
             else:
-                rows = _read_hpoa_from_path(env_path)
+                rows = _read_hpoa_from_path(cwd_path)
                 self._persist_hpoa_to_db(rows)
                 return rows
 
-        # 3) Cached copy in workdir
-        cached_path = None
-        if self.workdir and self.workdir.location:
-            cached_path = os.path.join(self.workdir.location, "phenotype.hpoa")
-            if os.path.exists(cached_path):
-                if pd is not None:
-                    df = pd.read_csv(cached_path, sep="\t", comment="#", dtype=str, keep_default_na=False)
-                    self._persist_df_to_db(df)
-                    return cast(List[Dict[str, str]], df.to_dict("records"))
-                else:
-                    rows = _read_hpoa_from_path(cached_path)
-                    self._persist_hpoa_to_db(rows)
-                    return rows
-
-        # 4) Download latest and cache
+        # 3) Download latest and save to CWD
         client = await get_client()
         r = await client.get("https://api.github.com/repos/obophenotype/human-phenotype-ontology/releases/latest")
         r.raise_for_status()
@@ -166,15 +156,13 @@ class HPOADependencies(HasWorkdir):
         f.raise_for_status()
         text = f.text
 
-        # Cache if possible
-        if cached_path:
-            try:
-                os.makedirs(os.path.dirname(cached_path), exist_ok=True)
-                with open(cached_path, "w", encoding="utf-8") as fh:
-                    fh.write(text)
-            except Exception:
-                # Non-fatal; continue without cache
-                pass
+        # Save to CWD as phenotype.hpoa
+        try:
+            with open(cwd_path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except Exception:
+            # Non-fatal; continue without saving
+            pass
 
         lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
         if pd is not None:
@@ -222,6 +210,22 @@ class HPOADependencies(HasWorkdir):
 
         if need_load:
             await self.fetch_and_parse_hpoa(path=path)
+        else:
+            # Ensure indexes exist even if table already populated
+            try:
+                con = sqlite3.connect(self.hpoa_db_path)
+                cur = con.cursor()
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid ON hpoa(database_id)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid_norm ON hpoa(UPPER(REPLACE(database_id,' ','')))")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dname_nocase ON hpoa(disease_name COLLATE NOCASE)")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_ref_upper ON hpoa(UPPER(reference))")
+                cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_hp_upper ON hpoa(UPPER(hpo_id))")
+                con.commit()
+            finally:
+                try:
+                    con.close()
+                except Exception:
+                    pass
 
     def _persist_hpoa_to_db(self, rows: List[Dict[str, str]]) -> None:
         """Persist HPOA rows into SQLite DB (overwrites existing table)."""
@@ -289,6 +293,7 @@ class HPOADependencies(HasWorkdir):
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid_norm ON hpoa(UPPER(REPLACE(database_id,' ','')))")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dname_nocase ON hpoa(disease_name COLLATE NOCASE)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_ref_upper ON hpoa(UPPER(reference))")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_hp_upper ON hpoa(UPPER(hpo_id))")
             con.commit()
         finally:
             con.close()
@@ -313,6 +318,7 @@ class HPOADependencies(HasWorkdir):
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid_norm ON hpoa(UPPER(REPLACE(database_id,' ','')))")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dname_nocase ON hpoa(disease_name COLLATE NOCASE)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_ref_upper ON hpoa(UPPER(reference))")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_hp_upper ON hpoa(UPPER(hpo_id))")
             con.commit()
         finally:
             con.close()
