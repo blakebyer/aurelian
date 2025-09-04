@@ -1,14 +1,11 @@
-"""
-Gradio interface for the HPOA agent.
-"""
+"""Gradio interface for the HPOA agent (simple)."""
 from typing import List, Optional
 import os
 import json
 
 import gradio as gr
 
-from aurelian.utils.async_utils import run_sync
-from .hpoa_agent import hpoa_agent, call_agent_with_retry, reset_tool_log, get_tool_log
+from .hpoa_agent import call_agent_with_retry
 from .hpoa_config import HPOADependencies
 
 
@@ -26,24 +23,23 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
     if deps is None:
         deps = HPOADependencies()
 
-    def get_info(query: str, history: List[str]):
-        # Keep it stateless and fast; still log incoming history for debugging
-        # Gradio will render Markdown/newlines in the returned string
-        print(f"QUERY: {query}")
+    def get_info(query: str, history: List[str]) -> str:
+        # Minimal handler; Gradio renders Markdown/newlines in returned string
         try:
-            print(f"HISTORY: {history}")
-        except Exception:
-            pass
-        try:
-            # Reset tool log for this turn
-            reset_tool_log()
-            # Use the retrying runner defined in hpoa_agent.py
+            # Preflight checks for required API keys and common setup issues
+            openai_key = os.environ.get("OPENAI_API_KEY")
+            if not openai_key:
+                return (
+                    "Missing required environment variable: OPENAI_API_KEY.\n\n"
+                    "Set it before launching. Examples:\n"
+                    "- PowerShell: `$env:OPENAI_API_KEY = 'sk-...'`\n"
+                    "- Bash: `export OPENAI_API_KEY=sk-...`\n\n"
+                    "After setting the key, restart the app."
+                )
+
+            # Stateless agent call per request
             result = call_agent_with_retry(query)
             data = result.output
-            # Prepare a reasoning/tool trace block first
-            trace = get_tool_log()
-            if trace:
-                yield f"Reasoning trace (tools):\n\n```json\n{json.dumps(trace, indent=2)}\n```"
             # Prefer conversational text; append a copyable JSON block when annotations are present
             if hasattr(data, "model_dump"):
                 dd = data.model_dump()
@@ -54,29 +50,34 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
                         "explanation": (text or ""),
                         "annotations": ann,
                     }, indent=2)
-                    yield f"{text}\n\n```json\n{block}\n```"
-                    return
-                yield text if text else json.dumps(dd, indent=2)
-                return
+                    return f"{text}\n\n```json\n{block}\n```"
+                return text if text else json.dumps(dd, indent=2)
             if isinstance(data, (dict, list)):
                 # Fallback: pretty print dicts/lists, which Gradio will render with newlines
-                yield json.dumps(data, indent=2)
-                return
-            yield str(data)
-            return
+                return json.dumps(data, indent=2)
+            return str(data)
         except Exception as e:
-            yield f"Error calling agent: {e}"
+            msg = str(e)
+            # Improve error visibility for missing credentials
+            if "OPENAI" in msg.upper() or "API KEY" in msg.upper():
+                return (
+                    "Error: model call failed. This often indicates a missing or invalid OPENAI_API_KEY.\n\n"
+                    f"Details: {msg}"
+                )
+            return f"Error calling agent: {msg}"
 
     return gr.ChatInterface(
         fn=get_info,
-        type="messages",
-        title="HPOA AI Assistant",
-        chatbot=gr.Chatbot(show_copy_button=True, render_markdown=True),
+        title="HPOA Assistant",
+        description="<div style='text-align: center;'>"
+                "An AI assistant for querying and curating Human Phenotype Ontology Annotations (HPOA)."
+                "</div>",
+        chatbot=gr.Chatbot(type="messages", show_copy_button=True, render_markdown=True),
         examples=[
-            ["Make HPOA file suggestions for Niemann-Pick, type C"],
+            ["List the phenotypes and source studies for OMIM:300615"],
             ["What neurological phenotypes are associated with Coffin-Lowry syndrome?"],
-            ["List the phenotype annotations for OMIM:301500"],
-            ["Return the phenotypes for PMID:19473999"]
+            ["Propose new annotations for Fabry disease based on PMID:21092187"],
+            ["Which system does HP:0004322 (Short stature) belong to?"]
         ]
     )
 
@@ -101,4 +102,4 @@ if __name__ == "__main__":
 
     ui = chat()
     print(f"Launching Gradio on http://{host}:{port}")
-    ui.launch(server_name=host, server_port=port, share=False, inbrowser=True)
+    ui.launch(server_name=host, server_port=port, inbrowser=True, share=True)

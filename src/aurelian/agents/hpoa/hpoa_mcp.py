@@ -31,38 +31,16 @@ def ctx() -> RunContext[HPOADependencies]:
     return rc
 
 @mcp.tool()
-async def search_hp(label: str) -> List[dict]:
-    """
-    Find associations for a given gene or gene product.
-
-    Args:
-        gene_id: Gene identifier (e.g., HGNC symbol like "BRCA1")
-        
-    Returns:
-        List of association objects containing subject, predicate, object details
-    """
-    return await ht.search_hp(ctx(), label)
+async def search_hp(term: str) -> List[dict]:
+    """Search HPO by ID or label (HP:nnnnnnn or text). Returns top matches."""
+    return await ht.search_hp(ctx(), term)
 
 
 @mcp.tool()
-async def find_disease_associations(disease_id: str) -> List[Dict]:
-    """
-    Find associations for a given disease.
+async def search_mondo(term: str) -> List[dict]:
+    """Search MONDO by ID or label (MONDO:nnnnnnn or text). Returns top matches."""
+    return await ht.search_mondo(ctx(), term)
 
-    Args:
-        disease_id: Disease identifier (e.g., MONDO:0007254)
-        
-    Returns:
-        List of association objects containing subject, predicate, object details
-    """
-    return await ht.find_disease_associations(ctx(), disease_id)
-
-@mcp.tool()
-async def search_mondo(label: str) -> List[dict]:
-    """
-    Search the MONDO Ontology for disease identifiers.
-    """
-    return await ht.search_mondo(ctx(), label)
 
 @mcp.tool()
 async def get_omim_terms(label: str) -> dict:
@@ -86,6 +64,16 @@ async def filter_hpoa(label: str):
     return await ht.filter_hpoa(ctx(), label)
 
 @mcp.tool()
+async def filter_hpoa_by_pmid(pmid: str):
+    """Return HPOA rows that cite a given PMID (PMID:nnnnnnn or digits)."""
+    return await ht.filter_hpoa_by_pmid(ctx(), pmid)
+
+@mcp.tool()
+async def filter_hpoa_by_hp(hp: str):
+    """Return HPOA rows with a given phenotype (HP:ID or label)."""
+    return await ht.filter_hpoa_by_hp(ctx(), hp)
+
+@mcp.tool()
 async def lookup_pmid(pmid: str) -> str:
     """
     Lookup a PubMed ID to get the article abstract.
@@ -93,17 +81,9 @@ async def lookup_pmid(pmid: str) -> str:
     return await ht.lookup_pmid(pmid)
 
 @mcp.tool()
-async def search_literature_pmids(query: str) -> List[str]:
-    """
-    Search the web for scientific literature using a text query.
-    
-    Args:
-        query: The search query (e.g., "alzheimer's disease genetics 2023")
-        
-    Returns:
-        List of PMIDs matching the query
-    """
-    return await ht.literature_search_pmids(query)
+async def pubmed_search_pmids(query: str) -> List[str]:
+    """Search PubMed (NCBI ESearch) for PMIDs matching a query. Returns ["PMID:nnnnnnn", ...]."""
+    return await ht.pubmed_search_pmids(ctx(), query)
 
 if __name__ == "__main__":
     # Initialize and run the server

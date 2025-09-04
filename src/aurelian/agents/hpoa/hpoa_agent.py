@@ -19,30 +19,11 @@ from aurelian.agents.hpoa.hpoa_tools import (
     )
 from aurelian.agents.filesystem.filesystem_tools import inspect_file, list_files
 from pydantic_ai import Agent, Tool
+from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
 from typing import List
 from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
 import inspect
 from functools import wraps
-from time import perf_counter
-
-# Simple in-process tool call log so the UI can show a trace
-_TOOL_LOG: list = []
-
-def reset_tool_log():
-    global _TOOL_LOG
-    _TOOL_LOG = []
-
-def get_tool_log():
-    return list(_TOOL_LOG)
-#import requests_cache
-
-# cache all requests to NCBI/OMIM/PubMed for 3 days to avoid rate limits
-# requests_cache.install_cache(
-#     "hpoa_cache",
-#     expire_after=3*24*3600,           # 3 days
-#     allowable_methods=("GET",),       # only cache GETs (safe)
-#     stale_if_error=True
-# )
 
 HPOA_SYSTEM_PROMPT = ("""
 You are an expert biocurator for HPO/MONDO/OMIM.
@@ -54,29 +35,34 @@ OUTPUT CONTRACT (important)
   - text: free-form, conversational answer
   - annotations: list (possibly empty). Leave empty for Q&A.
 
-Q&A TASKS (fast path — one baseline lookup, no external fetching)
+Q&A TASKS (fast path - choose the right source)
+- Intent detection first:
+  - Disease→phenotypes questions (e.g., list phenotypes for OMIM/MONDO/label/PMID; does disease X have phenotype Y?; organ-system phenotypes within a disease) MUST use HPOA via filter_hpoa/filter_hpoa_by_pmid/filter_hpoa_by_hp.
+  - Phenotype concept questions (e.g., what is HP:nnnnnnn? resolve a phenotype label to HP:ID; compare phenotypes) should use ontology tools (search_hp/search_mondo) and DO NOT call HPOA.
+
 - Disease by label:
   - Call filter_hpoa with the disease label (case-insensitive disease_name LIKE).
-  - Use ONLY the returned rows as context.
-  - Summarize up to 15 phenotypes in the text; if fewer than 15 exist, return all.
+  - Use ONLY the returned rows as context for the annotations. You may add commentary on the nature of the disease.
+  - Summarize up to 10 phenotypes in the text; if fewer than 10 exist, return all.
 - Disease by ID (OMIM/MONDO/ORPHA/DECIPHER):
   - Call filter_hpoa with the ID (normalized database_id equality).
-  - Summarize up to 15 phenotypes (or all if fewer).
+  - Summarize up to 10 phenotypes (or all if fewer).
 - By PMID:
   - Call filter_hpoa_by_pmid with "PMID:<digits>" or the bare digits.
-  - Summarize up to 15 phenotypes (or all if fewer).
+  - Summarize up to 10 phenotypes (or all if fewer).
 - Category within a disease (e.g., neurological/cardiac/renal):
   1) Call filter_hpoa for the disease (baseline).
   2) For each phenotype row, call categorize_hpo on its HP:ID and keep those in the requested category.
-  3) Summarize up to 15 matching phenotypes (or all if fewer).
+  3) Summarize up to 10 matching phenotypes (or all if fewer).
 - Terse or non-question inputs:
-  - Inputs like "phenotypes ORPHA:902", "OMIM:301500", or a disease label imply “list phenotypes”; apply the corresponding Q&A rule without waiting for a full sentence.
+    - If the input looks like a disease identifier/label (OMIM/MONDO/ORPHA/DECIPHER), treat it as list phenotypes and use HPOA.
+    - If the input looks like a phenotype identifier/label (HP:nnnnnnn or a phenotype label), resolve with search_hp and DO NOT call HPOA unless explicitly asked for phenotype?diseases.
 - Not found:
   - If the baseline returns zero rows, say: 
     "Sorry, the given ID/label is not found in the HPOA file. Please try alternate spelling or verify the disease ID."
   - Do not fabricate results or call literature tools in Q&A mode.
 - Phenotype → diseases:
-  - If given an HPO term (HP:ID or label), call filter_hpoa_by_hp and list the top 15 (or all if fewer) distinct diseases (database_id + disease_name).
+  - If given an HPO term (HP:ID or label), call filter_hpoa_by_hp and list the top 10 (or all if fewer) distinct diseases (database_id + disease_name).
   - If showing a phenotype label, you may verify it via search_hp when given an HP:ID.
 - Variants:
   - “Top phenotypes”: rank by most frequent unique hpo_id within the baseline subset.
@@ -89,6 +75,7 @@ In all Q&A cases:
 - Do NOT call external literature or OMIM tools.
 
 ABSOLUTELY NO HALLUCINATIONS
+- IDs and labels must come from tools: Never invent or guess. Use only data returned by filter_hpoa/filter_hpoa_by_pmid/filter_hpoa_by_hp for HPOA rows, search_hp for HPO terms/labels, search_mondo for MONDO IDs/labels, and get_omim_terms for OMIM. Normalize identifiers to HP:nnnnnnn and MONDO:nnnnnnn when shown. If a lookup returns no result, state that you cannot verify rather than inventing.
 - Source of truth: Loaded HPOA rows are authoritative for phenotypes, evidence codes, references (PMIDs/OMIM), frequency, onset, sex, and qualifiers. If a field is missing, say “not specified in HPOA”.
 - HPO IDs and labels: Never invent IDs or labels. Use hpo_id from HPOA rows. 
   - If you present labels, ensure correctness; you may call search_hp with "HP:<digits>" to verify, or with a phenotype label to resolve to an HP:ID.
@@ -107,6 +94,7 @@ TOOLS (what each does)
 - filter_hpoa: Load HPOA rows from SQLite.
   - Uses database_id equality for OMIM/MONDO/ORPHA/DECIPHER.
   - Uses case-insensitive disease_name LIKE for labels.
+- IDs/labels policy: All IDs and labels you present must be obtained from these tools (filter_hpoa/search_hp/search_mondo/get_omim_terms). Do not synthesize or infer.
 - filter_hpoa_by_pmid: Load existing HPOA rows citing a given PMID ("PMID:<digits>" or digits).
 - filter_hpoa_by_hp: Load rows for a given phenotype (HP:ID or label; labels resolved via search_hp). For phenotype?diseases queries.
 - categorize_hpo: Classify an HPO term into top-level organ-system categories using ontology ancestry (e.g., neurological, cardiac, renal). Safe to call multiple times.
@@ -118,9 +106,10 @@ TOOLS (what each does)
 
 WORKFLOW (to stay fast and precise)
 1) Q&A:
-   - Make ONE baseline call (filter_hpoa or filter_hpoa_by_pmid or filter_hpoa_by_hp).
-   - Use only the returned rows for the answer; optionally call categorize_hpo to filter by organ system.
-   - Summarize up to 15 items in clear, conversational text; leave annotations empty.
+   - If disease→phenotypes: make ONE HPOA call (filter_hpoa or filter_hpoa_by_pmid or filter_hpoa_by_hp) and optionally call categorize_hpo to filter by organ system.
+   - If phenotype concept: use ONLY ontology tools (search_hp/search_mondo) and avoid HPOA.
+   - Summarize up to 10 items (including both IDs and labels if they are terms) in clear, conversational text; leave annotations empty. You may summarize more than 10 if explicitly asked for more or a full list.
+    - Do NOT call literature or OMIM tools in Q&A mode.
 2) Curation (explicitly requested only):
    - Use search_mondo/get_omim_terms/search_hp/pubmed_search_pmids/lookup_pmid selectively to justify proposed changes.
    - Return structured annotations plus a brief explanation; include a small JSON block with {"explanation","annotations"}.
@@ -143,57 +132,21 @@ class ToolLimiter:
                 # Instead of crashing, return an error dict the model can see
                 return {"error": f"{self.func.__name__} exceeded {self.max_calls} calls"}
             self.calls += 1
-            # Log start/end with minimal, safe arg capture
-            start = perf_counter()
-            try:
-                result = await self.func(*args, **kwargs)
-                return result
-            finally:
-                try:
-                    dur_ms = int((perf_counter() - start) * 1000)
-                    # Avoid logging non-serializable ctx; drop first arg if looks like RunContext
-                    safe_args = []
-                    for i, a in enumerate(args):
-                        if i == 0 and a.__class__.__name__.startswith("RunContext"):
-                            continue
-                        try:
-                            safe_args.append(repr(a)[:200])
-                        except Exception:
-                            safe_args.append("<arg>")
-                    _TOOL_LOG.append({
-                        "tool": self.func.__name__,
-                        "calls": self.calls,
-                        "duration_ms": dur_ms,
-                        "args": safe_args,
-                        "kwargs": {k: (repr(v)[:200] if not hasattr(v, '__dict__') else '<obj>') for k, v in kwargs.items()},
-                    })
-                except Exception:
-                    pass
+            return await self.func(*args, **kwargs)
 
         wrapper.__signature__ = sig  # keep schema for Pydantic-AI
         return wrapper
 
-# retry logic for transient API errors (shorter backoff)
-@retry(wait=wait_random_exponential(min=0.3, max=8), stop=stop_after_attempt(3),
-       retry=retry_if_exception_type(ModelHTTPError))
-def call_agent_with_retry(input: str):
-    try:
-        return hpoa_agent.run_sync(
-            input,
-            deps=get_config(),
-            usage_limits=UsageLimits(request_limit=50),
-        )
-    finally:
-        # close shared HTTP client after each completion to reduce idle sockets
-        # and ensure fresh client per user request/session
-        import anyio
-        try:
-            anyio.run(close_client)
-        except Exception:
-            pass
+# Configure OpenAI reasoning model with summary to expose in responses
+oai_model = OpenAIResponsesModel("gpt-5-mini")
+oai_settings = OpenAIResponsesModelSettings(
+    openai_reasoning_effort="low",
+    openai_reasoning_summary="concise",
+)
 
 hpoa_agent = Agent(
-    model="openai:gpt-4o",
+    model=oai_model,
+    model_settings=oai_settings,
     output_type=HPOAMixedResponse,
     system_prompt=HPOA_SYSTEM_PROMPT,
     tools=[
@@ -214,3 +167,46 @@ hpoa_agent = Agent(
         Tool(ToolLimiter(pubmed_search_pmids, max_calls=2).wrap()),
     ],
 )
+
+simple_hpoa_agent = Agent(
+    model="gpt-5-mini",
+    output_type=HPOAMixedResponse,
+    system_prompt=HPOA_SYSTEM_PROMPT,
+    tools=[
+        # baseline
+        Tool(filter_hpoa),
+        Tool(filter_hpoa_by_pmid),
+        Tool(filter_hpoa_by_hp,),
+        Tool(search_hp),
+        Tool(categorize_hpo),
+      
+        # disease lookup
+        Tool(get_omim_terms),
+        Tool(search_mondo),
+
+        # curation tools
+        Tool(get_omim_clinical),
+        Tool(lookup_pmid_text),
+        Tool(pubmed_search_pmids),
+    ],
+)
+
+# retry logic for transient API errors (shorter backoff)
+@retry(wait=wait_random_exponential(min=0, max=10), stop=stop_after_attempt(3),
+       retry=retry_if_exception_type(ModelHTTPError))
+def call_agent_with_retry(input: str):
+    try:
+        return simple_hpoa_agent.run_sync(
+            input,
+            deps=get_config(),
+            usage_limits=UsageLimits(request_limit=50),
+        )
+    finally:
+        # close shared HTTP client after each completion to reduce idle sockets
+        # and ensure fresh client per user request/session
+        import anyio
+        try:
+            anyio.run(close_client)
+        except Exception:
+            pass
+
