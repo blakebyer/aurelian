@@ -86,6 +86,18 @@ async def categorize_hpo(hp: str) -> List[str]:
     return await ht.categorize_hpo(ctx(), hp)
 
 @mcp.tool()
+async def categorize_mondo(term: str) -> List[str]:
+    """Categorize a MONDO term into high-level disease groupings.
+
+    Args:
+        term: MONDO:ID or disease label
+
+    Returns:
+        List like ["MONDO:xxxxxxx (Label)", ...] for matching categories
+    """
+    return await ht.categorize_mondo(ctx(), term)
+
+@mcp.tool()
 async def lookup_pmid(pmid: str) -> str:
     """
     Lookup a PubMed ID to get the article abstract.

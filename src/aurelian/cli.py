@@ -687,6 +687,22 @@ def ubergraph(ui, query, **kwargs):
 @server_port_option
 @ui_option
 @click.argument("query", nargs=-1, required=False)
+def hpoa(ui, query, **kwargs):
+    """Start the HPOA Agent for Human Phenotype Ontology annotations.
+
+    - Direct query: ask disease→phenotypes (OMIM/MONDO/label/PMID) or phenotype concept questions (HP:ID/label).
+    - UI: start an interactive chat interface.
+    """
+    run_agent("hpoa", "aurelian.agents.hpoa", query=query, ui=ui, **kwargs)
+
+
+@main.command()
+@model_option
+@workdir_option
+@share_option
+@server_port_option
+@ui_option
+@click.argument("query", nargs=-1, required=False)
 def gene(ui, query, **kwargs):
     """Start the Gene Agent for retrieving gene descriptions.
     

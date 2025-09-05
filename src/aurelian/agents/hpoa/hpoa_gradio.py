@@ -2,6 +2,7 @@
 from typing import List, Optional
 import os
 import json
+import re
 
 import gradio as gr
 
@@ -23,6 +24,20 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
     if deps is None:
         deps = HPOADependencies()
 
+    def _strip_json_blocks(text: str) -> str:
+        """Strip fenced JSON blocks (```json ...``` or ```{...}```) from text."""
+        if not text:
+            return text
+        pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
+
+        def repl(m: re.Match) -> str:
+            inner = (m.group(1) or "").strip()
+            if inner.startswith("{") or inner.startswith("["):
+                return ""
+            return m.group(0)
+
+        return re.sub(pattern, repl, text).strip()
+
     def get_info(query: str, history: List[str]) -> str:
         # Minimal handler; Gradio renders Markdown/newlines in returned string
         try:
@@ -43,7 +58,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
             # Prefer conversational text; append a copyable JSON block when annotations are present
             if hasattr(data, "model_dump"):
                 dd = data.model_dump()
-                text = dd.get("text") or ""
+                text = _strip_json_blocks(dd.get("text") or "")
                 ann = dd.get("annotations") or []
                 if ann:
                     block = json.dumps({
@@ -73,16 +88,17 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
 
     return gr.ChatInterface(
         fn=get_info,
+        type="messages",
         title="HPOA Assistant",
         description="<div style='text-align: center;'>"
-                "An AI assistant for querying and curating Human Phenotype Ontology Annotations (HPOA)."
+                "An AI assistant for querying and curating Human Phenotype Ontology Annotations (HPOA)"
                 "</div>",
-        chatbot=gr.Chatbot(type="messages", show_copy_button=True, render_markdown=True),
+        chatbot=gr.Chatbot(show_copy_button=True, render_markdown=True),
         examples=[
             ["List the phenotypes and source studies for OMIM:300615"],
             ["What neurological phenotypes are associated with Coffin-Lowry syndrome?"],
             ["Propose new annotations for Fabry disease based on PMID:21092187"],
-            ["Which system does HP:0004322 (Short stature) belong to?"]
+            ["Which organ system does HP:0004322 (Short stature) belong to?"]
         ]
     )
 
@@ -98,7 +114,8 @@ if __name__ == "__main__":
         print('$env:OPENAI_API_KEY = "sk-..."')
         raise SystemExit(1)
     if not omim_key:
-        print("WARNING: OMIM_API_KEY not set. OMIM tools will be unavailable.")
+        print("ERROR: OMIM_API_KEY not set. OMIM tools will be unavailable.")
+        raise SystemExit(1)
     if not ncbi_key:
         print("WARNING: NCBI_API_KEY not set. PubMed tools will be rate-limited.")
 

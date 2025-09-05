@@ -1,7 +1,7 @@
 """ Configuration file for HPOA Agent """
 from pydantic import BaseModel, Field, model_validator
 from dataclasses import dataclass, field
-import os, csv, sqlite3
+import os, csv, sqlite3, re
 from io import StringIO
 from typing import cast
 import pandas as pd
@@ -27,7 +27,7 @@ class HPOA(BaseModel):
                                                    PCS (published clinical study): annotations extracted from articles in the medical literature.
                                                    TAS (traceable author statement): annotations extracted from knowledge bases such as OMIM or Orphanet that have derived the information from a published source..""")
     onset: Optional[str] = Field(..., description="""A term-id from the HPO-sub-ontology below the term `Age of onset` (HP:0003674). Note that if an HPO onset term is used in this field, it refers to the onset of the feature specified in field `hpo_id` in the disease being annotated. If an HPO term is used for age of onset in field `hpo_id` then it refers to the overall age of onset of the disease.""")
-    frequency: Optional[str] = Field(..., description="""There are three allowed options for this field. (A) A term-id from the HPO-sub-ontology below the term `Frequency` (HP:0040279), (B) A count of patients affected within a cohort. For instance, 7/13 would indicate 7 of 13 patients with the disease in the `reference` field study were affected by the phenotype in the `hpo_id` field, and (C) A percentage value such as 17%.""")	
+    frequency: Optional[str] = Field(..., description="""Must be a fraction (e.g., 7/13) or a percentage (e.g., 17%). Leave empty if unspecified.""")	
     sex: Optional[Literal["MALE", "FEMALE", ""]] = Field(..., description="""This field contains the strings MALE or FEMALE if the annotation in question is limited to males or females. This field refers to the phenotypic (and not the chromosomal) sex. If a phenotype is limited to one sex then a modifier from the clinical modifier subontology should be noted in the modifier field.""")	
     modifier: Optional[str]	= Field(..., description="A term-id from the HPO-sub-ontology below the term `Clinical modifier`.")
     aspect: Literal["P", "I", "C", "M"] = Field(..., description="""Terms with the P aspect are located in the Phenotypic abnormality subontology.
@@ -374,3 +374,5 @@ async def close_client() -> None:
             await _async_client.aclose()
         finally:
             _async_client = None
+
+
