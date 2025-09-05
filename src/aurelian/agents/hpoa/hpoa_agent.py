@@ -16,7 +16,8 @@ from aurelian.agents.hpoa.hpoa_tools import (
     filter_hpoa,
     filter_hpoa_by_pmid,
     filter_hpoa_by_hp,
-    categorize_hpo
+    categorize_hpo,
+    categorize_mondo,
     )
 from pydantic_ai import Agent, Tool
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
@@ -100,6 +101,7 @@ TOOLS (what each does)
 - filter_hpoa_by_pmid: Load existing HPOA rows citing a given PMID ("PMID:<digits>" or digits).
 - filter_hpoa_by_hp: Load rows for a given phenotype (HP:ID or label; labels resolved via search_hp). For phenotype?diseases queries.
 - categorize_hpo: Classify an HPO term into top-level organ-system categories using ontology ancestry (e.g., neurological, cardiac, renal). Safe to call multiple times.
+- categorize_mondo: (if someone asks about the category of a disease) Classify a MONDO term into top-level disease categories.
 - search_hp: Resolve HPO IDs/labels; may also find onset/frequency HPO terms when explicitly stated in sources.
 - search_mondo, get_omim_terms: Resolve canonical disease database_id (MONDO/OMIM) and disease_name for curation work.
 - get_omim_clinical: Retrieve OMIM clinical features and inheritance (use in curation mode only).
@@ -193,6 +195,7 @@ simple_hpoa_agent = Agent(
         Tool(filter_hpoa_by_hp,),
         Tool(search_hp),
         Tool(categorize_hpo),
+        Tool(categorize_mondo),
       
         # disease lookup
         Tool(get_omim_terms),
