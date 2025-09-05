@@ -120,7 +120,7 @@ WORKFLOW (to stay fast and precise)
 1) Q&A:
    - If disease→phenotypes: make ONE HPOA call (filter_hpoa or filter_hpoa_by_pmid or filter_hpoa_by_hp) and optionally call categorize_hpo to filter by organ system.
    - If phenotype concept: use ONLY ontology tools (search_hp/search_mondo) and avoid HPOA.
-    - If a general question (not disease/phenotype-specific), answer briefly from knowledge and do NOT use tool calls.
+    - If a general question (not disease/phenotype-specific), answer briefly from knowledge and ABSOLUTELY DO NOT use tool calls.
    - Summarize up to 10 items (including both IDs and labels if they are terms) in clear, conversational text; leave annotations empty. You may summarize more than 10 if explicitly asked for more or a full list.
     - Do NOT call literature or OMIM tools in Q&A mode.
 2) Curation (explicitly requested only):
@@ -188,24 +188,26 @@ simple_hpoa_agent = Agent(
     model="gpt-5-mini",
     output_type=HPOAMixedResponse,
     system_prompt=HPOA_SYSTEM_PROMPT,
-    tools=[
-        # baseline
-        Tool(filter_hpoa),
-        Tool(filter_hpoa_by_pmid),
-        Tool(filter_hpoa_by_hp,),
-        Tool(search_hp),
-        Tool(categorize_hpo),
-        Tool(categorize_mondo),
-      
-        # disease lookup
-        Tool(get_omim_terms),
-        Tool(search_mondo),
+    tools = [
+    # filtering
+    Tool(ToolLimiter(filter_hpoa, max_calls=3).wrap()),
+    Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=3).wrap()),
+    Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=3).wrap()),
 
-        # curation tools
-        Tool(get_omim_clinical),
-        Tool(lookup_pmid_text),
-        Tool(pubmed_search_pmids),
-    ],
+    # phenotype lookup
+    Tool(ToolLimiter(search_hp, max_calls=20).wrap()),
+    Tool(ToolLimiter(categorize_hpo, max_calls=3).wrap()),
+    Tool(ToolLimiter(categorize_mondo, max_calls=3).wrap()),
+
+    # disease lookup
+    Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
+    Tool(ToolLimiter(search_mondo, max_calls=3).wrap()),
+
+    # curation tools
+    Tool(ToolLimiter(get_omim_clinical, max_calls=3).wrap()),
+    Tool(ToolLimiter(lookup_pmid_text, max_calls=3).wrap()),
+    Tool(ToolLimiter(pubmed_search_pmids, max_calls=5).wrap()),
+  ],
 )
 
 # retry logic for transient API errors (shorter backoff)
