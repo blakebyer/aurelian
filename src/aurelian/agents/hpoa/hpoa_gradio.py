@@ -58,6 +58,11 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
             return str(data)
         except Exception as e:
             msg = str(e)
+            if "rate limit" in msg.lower() or "429" in msg:
+                return (
+                    "Error: rate limit exceeded. Please try again in a few seconds.\n\n"
+                    f"Details: {msg}"
+                )
             # Improve error visibility for missing credentials
             if "OPENAI" in msg.upper() or "API KEY" in msg.upper():
                 return (

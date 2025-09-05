@@ -140,3 +140,4 @@ dmypy.json
 # hpoa agent
 hpoa.db
 phenotype.hpoa
+history.json

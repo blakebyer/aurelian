@@ -1,10 +1,11 @@
 """
 Agent for working with .hpoa files.
 """
+from pathlib import Path
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import ModelHTTPError
-from aurelian.agents.hpoa.hpoa_config import HPOAMixedResponse
-from aurelian.agents.hpoa.hpoa_config import get_config, close_client
+from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, TextPart, UserPromptPart 
+from aurelian.agents.hpoa.hpoa_config import HPOAMixedResponse, get_config, close_client
 from aurelian.agents.hpoa.hpoa_tools import (
     search_hp,
     search_mondo,
@@ -17,10 +18,9 @@ from aurelian.agents.hpoa.hpoa_tools import (
     filter_hpoa_by_hp,
     categorize_hpo
     )
-from aurelian.agents.filesystem.filesystem_tools import inspect_file, list_files
 from pydantic_ai import Agent, Tool
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
-from typing import List
+from typing import List, Optional
 from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
 import inspect
 from functools import wraps
@@ -71,6 +71,8 @@ Q&A TASKS (fast path - choose the right source)
 
 In all Q&A cases:
 - Be brief and direct. 
+- If a user asks something off-topic, if it is scientific/medical, you may answer briefly; otherwise, politely decline (do NOT call tools).
+- If you are not sure what the user wants, ask a clarifying question. Don't try to complete an impossible task.
 - Leave annotations empty. 
 - Do NOT call external literature or OMIM tools.
 
@@ -103,11 +105,20 @@ TOOLS (what each does)
 - get_omim_clinical: Retrieve OMIM clinical features and inheritance (use in curation mode only).
 - pubmed_search_pmids: Find PMIDs from a disease label query (curation mode).
 - lookup_pmid: Fetch abstract or text for PMID:<digits> (normalize first; curation mode).
+                      
+ANNOTATION FIELDS (use exactly as in phenotype.hpoa)
+Sex should be one of "MALE", or "FEMALE", or empty.
+Onset should be an HPO term (HP:nnnnnnn) or empty. Do not return a label alone; you may verify via search_hp.
+Sex-specific frequencies: If a paper reports different frequencies for males and females, output separate annotations (rows) per sex. Duplicate all other fields; set sex to MALE or FEMALE and frequency to the matching value. Do not combine both sexes in one row. If no sex is mentioned, leave this field empty.
+Frequency should be an HP frequency term, a fraction, or a percentage. Do not return a combination of these. If none are specified, leave this field empty. 
+Qualifier: should be "NOT" if the phenotype is explicitly excluded; otherwise, leave empty.
+Refer to the HPOA schema for details.
 
 WORKFLOW (to stay fast and precise)
 1) Q&A:
    - If disease→phenotypes: make ONE HPOA call (filter_hpoa or filter_hpoa_by_pmid or filter_hpoa_by_hp) and optionally call categorize_hpo to filter by organ system.
    - If phenotype concept: use ONLY ontology tools (search_hp/search_mondo) and avoid HPOA.
+    - If a general question (not disease/phenotype-specific), answer briefly from knowledge and do NOT use tool calls.
    - Summarize up to 10 items (including both IDs and labels if they are terms) in clear, conversational text; leave annotations empty. You may summarize more than 10 if explicitly asked for more or a full list.
     - Do NOT call literature or OMIM tools in Q&A mode.
 2) Curation (explicitly requested only):
@@ -116,6 +127,9 @@ WORKFLOW (to stay fast and precise)
 3) Be conservative, fast, and transparent. It’s acceptable to propose no changes when evidence is insufficient.
 4) Include onset/frequency/sex only when supported by HPOA fields (or explicit evidence in curation mode).
 """)
+
+MSG_HISTORY: list[ModelMessage] = []  # keep last few messages for context
+HISTORY_PATH = Path("history.json")
 
 class ToolLimiter:
     def __init__(self, func, max_calls: int):
@@ -195,12 +209,30 @@ simple_hpoa_agent = Agent(
 @retry(wait=wait_random_exponential(min=0, max=10), stop=stop_after_attempt(3),
        retry=retry_if_exception_type(ModelHTTPError))
 def call_agent_with_retry(input: str):
+    global MSG_HISTORY
+  
+    def create_context(messages: list[ModelMessage]) -> list[ModelMessage]:
+      """Remove all but the last 2 messages to keep context."""
+      return [msg for msg in messages if isinstance(msg, TextPart) or isinstance(msg, UserPromptPart)][-2:]
+    
     try:
-        return simple_hpoa_agent.run_sync(
+        result = simple_hpoa_agent.run_sync(
             input,
             deps=get_config(),
+            message_history=MSG_HISTORY or None,
+            history_processors=[create_context],
             usage_limits=UsageLimits(request_limit=50),
         )
+
+        # append the new messages
+        MSG_HISTORY.extend(result.new_messages())
+
+        # save whole history as pretty JSON
+        HISTORY_PATH.write_bytes(
+            ModelMessagesTypeAdapter.dump_json(MSG_HISTORY, indent=2)
+        )
+
+        return result
     finally:
         # close shared HTTP client after each completion to reduce idle sockets
         # and ensure fresh client per user request/session
@@ -209,4 +241,3 @@ def call_agent_with_retry(input: str):
             anyio.run(close_client)
         except Exception:
             pass
-

@@ -380,7 +380,7 @@ def parents_of(ctx: RunContext[HPOADependencies], child: str) -> List[str]:
 async def categorize_hpo(ctx: RunContext[HPOADependencies], term: str) -> List[str]:
     """
     Categorize a term into top-level systems under HP:0000118.
-    Returns list like: ["HP:xxxxxxx | Label", ...].
+    Returns list like: ["HP:xxxxxxx (Label)", ...].
     """
     config = ctx.deps or get_config()
     hp = config.get_hp_adapter()
@@ -389,4 +389,22 @@ async def categorize_hpo(ctx: RunContext[HPOADependencies], term: str) -> List[s
         ancestors = set(hp.ancestors(term, reflexive=True) or [])
     except Exception:
         ancestors = set()
-    return [f"{s} | {hp.label(s)}" for s in systems if s in ancestors]
+    return [f"{s} ({hp.label(s)})" for s in systems if s in ancestors]
+
+async def categorize_mondo(ctx: RunContext[HPOADependencies], term: str) -> List[str]:
+    """
+    Categorize a MONDO term into top-level categories under MONDO:0700096 (human disease).
+    Returns list like: ["MONDO:xxxxxxx (Label)", ...].
+    """
+    config = ctx.deps or get_config()
+    mondo = config.get_mondo_adapter()
+    MONDO_SYSTEM_ROOT = "MONDO:0700096"  # disease
+    try:
+        systems = [s for s, p, o in mondo.relationships(objects=[MONDO_SYSTEM_ROOT])]
+    except Exception:
+        systems = []
+    try:
+        ancestors = set(mondo.ancestors(term, reflexive=True) or [])
+    except Exception:
+        ancestors = set()
+    return [f"{s} ({mondo.label(s)})" for s in systems if s in ancestors]

@@ -74,6 +74,18 @@ async def filter_hpoa_by_hp(hp: str):
     return await ht.filter_hpoa_by_hp(ctx(), hp)
 
 @mcp.tool()
+async def categorize_hpo(hp: str) -> List[str]:
+    """Categorize an HPO term into top-level organ-system buckets under HP:0000118.
+
+    Args:
+        hp: An HPO identifier (HP:nnnnnnn) or label
+
+    Returns:
+        A list of strings like "HP:xxxxxxx | Label" for matching system categories
+    """
+    return await ht.categorize_hpo(ctx(), hp)
+
+@mcp.tool()
 async def lookup_pmid(pmid: str) -> str:
     """
     Lookup a PubMed ID to get the article abstract.

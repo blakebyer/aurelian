@@ -1,5 +1,5 @@
 """ Configuration file for HPOA Agent """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from dataclasses import dataclass, field
 import os, csv, sqlite3
 from io import StringIO
@@ -20,7 +20,7 @@ _MONDO_ADAPTER_SINGLETON: Optional[BasicOntologyInterface] = None
 class HPOA(BaseModel):
     database_id: str = Field(..., description="Refers to the database `disease_name` is drawn from. Must be formatted as a CURIE, e.g., OMIM:1547800 or MONDO:0021190")
     disease_name: str = Field(..., description="This is the name of the disease associated with the `database_id` in the database. Only the accepted name should be used, synonyms should not be listed here.")	
-    qualifier: Optional[Literal["", "NOT"]] = Field(..., description="""This field is used to qualify the annotation shown in field `hpo_id`. The field can only be used to record `NOT` or is empty. A value of NOT indicates that the disease in question is not characterized by the indicated HPO term. This is used to record phenotypic features that can be of special differential diagnostic utility.""")
+    qualifier: Optional[Literal["NOT", ""]] = Field(..., description="""This field is used to qualify the annotation shown in field `hpo_id`. The field can only be used to record `NOT` or is empty. A value of NOT indicates that the disease in question is not characterized by the indicated HPO term. This is used to record phenotypic features that can be of special differential diagnostic utility.""")
     hpo_id: str = Field(..., description="This field is for the HPO identifier for the term attributed to the `disease_name`.")
     reference: str = Field(..., description="""This field indicates the source of the information used for the annotation. This may be the clinical experience of the annotator, an article as indicated by a PMID, or an HPO collaborator ID, e.g. HPO:RefId. If a PMID cannot be found, default back to OMIM:mimNumber.""")	
     evidence: Literal["IEA", "PCS", "TAS"] = Field(..., description="""IEA (inferred from electronic annotation): annotations extracted from OMIM.
@@ -36,6 +36,12 @@ class HPOA(BaseModel):
                               Terms with the M aspect are located in the Clinical Modifier subontology.""")	
     biocuration: str = Field(..., 
                              default_factory = lambda: f"HPO:Agent[{date.today().isoformat()}]",description="""This refers to the biocurator who made the annotation and the date on which the annotation was made; the date format is YYYY-MM-DD. The first entry in this field refers to the creation date. Any additional biocuration is recorded following a semicolon. So, if Joseph curated on July 5, 2012, and Suzanna curated on December 7, 2015, one might have a field like this: HPO:Joseph[2012-07-05];HPO:Suzanna[2015-12-07]. It is acceptable to use ORCID ids.""")
+    @model_validator(mode="before")
+    @classmethod
+    def default_biocuration(cls, data: Any):
+        if isinstance(data, dict):
+            data.pop("biocuration", None)  # refuse any provided value
+        return data
 
 class HPOAResult(BaseModel):
     status: Literal["new", "updated", "removed"] = Field(
