@@ -115,6 +115,10 @@ class ToolLimiter:
 
         wrapper.__signature__ = sig  # keep schema for Pydantic-AI
         return wrapper
+    
+def create_context(messages: list[ModelMessage]) -> list[ModelMessage]:
+      """Remove all but the last 2 messages to keep context."""
+      return [msg for msg in messages if isinstance(msg, TextPart) or isinstance(msg, UserPromptPart)][-2:]
 
 # Configure OpenAI reasoning model with summary to expose in responses
 oai_model = OpenAIResponsesModel("gpt-5-mini")
@@ -128,6 +132,7 @@ hpoa_agent = Agent(
     model_settings=oai_settings,
     output_type=HPOAMixedResponse,
     system_prompt=HPOA_SYSTEM_PROMPT,
+    history_processors=[create_context],
     tools=[
         # baseline
         Tool(ToolLimiter(filter_hpoa, max_calls=2).wrap()),
@@ -151,6 +156,7 @@ simple_hpoa_agent = Agent(
     model="gpt-5-mini",
     output_type=HPOAMixedResponse,
     system_prompt=HPOA_SYSTEM_PROMPT,
+    history_processors=[create_context],
     tools = [
     # filtering
     Tool(ToolLimiter(filter_hpoa, max_calls=2).wrap()),
@@ -177,18 +183,12 @@ simple_hpoa_agent = Agent(
 @retry(wait=wait_random_exponential(min=0, max=10), stop=stop_after_attempt(3),
        retry=retry_if_exception_type(ModelHTTPError))
 def call_agent_with_retry(input: str):
-    global MSG_HISTORY
-  
-    def create_context(messages: list[ModelMessage]) -> list[ModelMessage]:
-      """Remove all but the last 2 messages to keep context."""
-      return [msg for msg in messages if isinstance(msg, TextPart) or isinstance(msg, UserPromptPart)][-2:]
-    
+    global MSG_HISTORY  
     try:
         result = simple_hpoa_agent.run_sync(
             input,
             deps=get_config(),
             message_history=MSG_HISTORY or None,
-            history_processors=[create_context],
             usage_limits=UsageLimits(request_limit=75),
         )
 
