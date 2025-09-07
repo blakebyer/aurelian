@@ -3,6 +3,7 @@ Agent for working with .hpoa files.
 """
 from pathlib import Path
 from pydantic_ai import Agent
+from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, TextPart, UserPromptPart 
@@ -19,6 +20,8 @@ from aurelian.agents.hpoa.hpoa_tools import (
     filter_hpoa_by_hp,
     categorize_hpo,
     categorize_mondo,
+    children_of,
+    parents_of
     )
 from pydantic_ai import Agent, Tool
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
@@ -93,6 +96,14 @@ Workflow
 4) Include onset/frequency/sex only when supported by HPOA or explicit evidence in curation"""
 )
 
+HPOA_SIMPLE_SYSTEM_PROMPT = ("""You are an expert biocurator for HPO & MONDO, who can also answer questions about biology, medicine, and human diseases and phenotypes. Default to fast, conversational Q&A; use search_hp(HP:refID or phenotype label) to return information about an HPO term (including ID, label, and definition), use categorize_hpo to return the category of an HPO term, use search_mondo(MONDO:refID OR disease label) to return information about a MONDO term (including ID, label, and definition), and categorize_mondo to return the organ system of a MONDO term or disease label.
+Use children_of(HP:refID) or parents_of(HP:refID) to get direct children or parents of an HPO term.
+Use children_of(MONDO:refID) or parents_of(MONDO:refID) to get direct children or parents of a MONDO term.
+At a maximum, list 10 children or parents, or if there are none, say "no children" or "no parents".
+When listing ontology terms, always include both the ID and label, the label enclosed in parentheses, e.g. "HP:0004322 (Short stature)".
+Do NOT call tools unless necessary. Absolutely no hallucinations, the ontology IDs, labels, and definitions must come from the tools. If a user provides an invalid ID or label, say you cannot find it.
+If unclear, ask one short clarifying question. If the user asks an off-topic question, politely decline and remind them of your scope. Be brief and direct.""")
+
 MSG_HISTORY: list[ModelMessage] = []  # keep last few messages for context
 HISTORY_PATH = Path("history.json")
 
@@ -116,9 +127,9 @@ class ToolLimiter:
         wrapper.__signature__ = sig  # keep schema for Pydantic-AI
         return wrapper
     
-def create_context(messages: list[ModelMessage]) -> list[ModelMessage]:
-      """Remove all but the last 2 messages to keep context."""
-      return [msg for msg in messages if isinstance(msg, TextPart) or isinstance(msg, UserPromptPart)][-2:]
+def create_context(messages: list[ModelMessage], n_messages: int = 2) -> list[ModelMessage]:
+      """Remove all but the last n_messages messages to keep context."""
+      return [msg for msg in messages if isinstance(msg, TextPart) or isinstance(msg, UserPromptPart)][-n_messages:]
 
 # Configure OpenAI reasoning model with summary to expose in responses
 oai_model = OpenAIResponsesModel("gpt-5-mini")
@@ -127,55 +138,72 @@ oai_settings = OpenAIResponsesModelSettings(
     openai_reasoning_summary="concise",
 )
 
-hpoa_agent = Agent(
+hpoa_reasoning_agent = Agent(
     model=oai_model,
     model_settings=oai_settings,
     output_type=HPOAMixedResponse,
     system_prompt=HPOA_SYSTEM_PROMPT,
     history_processors=[create_context],
     tools=[
-        # baseline
-        Tool(ToolLimiter(filter_hpoa, max_calls=2).wrap()),
-        Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=2).wrap()),
-        Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=2).wrap()),
-        Tool(ToolLimiter(search_hp, max_calls=20).wrap()),
-        Tool(ToolLimiter(categorize_hpo, max_calls=50).wrap()),
-      
+        # filtering
+        Tool(ToolLimiter(filter_hpoa, max_calls=3).wrap()),
+        Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=3).wrap()),
+        Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=3).wrap()),
+
+        # phenotype lookup
+        Tool(ToolLimiter(search_hp, max_calls=25).wrap()),
+        Tool(ToolLimiter(categorize_hpo, max_calls=25).wrap()),
+        Tool(ToolLimiter(categorize_mondo, max_calls=3).wrap()),
+
         # disease lookup
         Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
-        Tool(ToolLimiter(search_mondo, max_calls=2).wrap()),
-        
+        Tool(ToolLimiter(search_mondo, max_calls=3).wrap()),
+
         # curation tools
-        Tool(ToolLimiter(get_omim_clinical, max_calls=2).wrap()),
-        Tool(ToolLimiter(lookup_pmid_text, max_calls=5).wrap()),
-        Tool(ToolLimiter(pubmed_search_pmids, max_calls=2).wrap()),
+        Tool(ToolLimiter(get_omim_clinical, max_calls=3).wrap()),
+        Tool(ToolLimiter(lookup_pmid_text, max_calls=3).wrap()),
+        Tool(ToolLimiter(pubmed_search_pmids, max_calls=3).wrap()),
     ],
 )
 
-simple_hpoa_agent = Agent(
+hpoa_simple_agent = Agent(
+    model="gpt-5-mini",
+    output_type=Optional[str],
+    system_prompt=HPOA_SIMPLE_SYSTEM_PROMPT,
+    tools=[
+        Tool(ToolLimiter(search_hp, max_calls=10).wrap()),
+        Tool(ToolLimiter(categorize_hpo, max_calls=3).wrap()),
+        Tool(ToolLimiter(search_mondo, max_calls=10).wrap()),
+        Tool(ToolLimiter(categorize_mondo, max_calls=3).wrap()),
+        Tool(ToolLimiter(children_of, max_calls=3).wrap()),
+        Tool(ToolLimiter(parents_of, max_calls=3).wrap()),
+    ]
+)
+
+hpoa_agent = Agent(
     model="gpt-5-mini",
     output_type=HPOAMixedResponse,
     system_prompt=HPOA_SYSTEM_PROMPT,
     history_processors=[create_context],
     tools = [
     # filtering
-    Tool(ToolLimiter(filter_hpoa, max_calls=2).wrap()),
-    Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=2).wrap()),
-    Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=2).wrap()),
+    Tool(ToolLimiter(filter_hpoa, max_calls=3).wrap()),
+    Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=3).wrap()),
+    Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=3).wrap()),
 
     # phenotype lookup
     Tool(ToolLimiter(search_hp, max_calls=25).wrap()),
     Tool(ToolLimiter(categorize_hpo, max_calls=25).wrap()),
-    Tool(ToolLimiter(categorize_mondo, max_calls=2).wrap()),
+    Tool(ToolLimiter(categorize_mondo, max_calls=3).wrap()),
 
     # disease lookup
-    Tool(ToolLimiter(get_omim_terms, max_calls=2).wrap()),
-    Tool(ToolLimiter(search_mondo, max_calls=2).wrap()),
+    Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
+    Tool(ToolLimiter(search_mondo, max_calls=3).wrap()),
 
     # curation tools
-    Tool(ToolLimiter(get_omim_clinical, max_calls=2).wrap()),
+    Tool(ToolLimiter(get_omim_clinical, max_calls=3).wrap()),
     Tool(ToolLimiter(lookup_pmid_text, max_calls=3).wrap()),
-    Tool(ToolLimiter(pubmed_search_pmids, max_calls=2).wrap()),
+    Tool(ToolLimiter(pubmed_search_pmids, max_calls=3).wrap()),
   ],
 )
 
@@ -185,7 +213,7 @@ simple_hpoa_agent = Agent(
 def call_agent_with_retry(input: str):
     global MSG_HISTORY  
     try:
-        result = simple_hpoa_agent.run_sync(
+        result = hpoa_agent.run_sync(
             input,
             deps=get_config(),
             message_history=MSG_HISTORY or None,

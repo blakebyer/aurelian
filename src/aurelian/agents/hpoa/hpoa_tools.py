@@ -353,27 +353,37 @@ async def pubmed_search_pmids(ctx: RunContext[HPOADependencies], query: str, ret
 # Helper functions for dealing with HPO hierarchy
 HP_SYSTEM_ROOT = "HP:0000118"  # Phenotypic abnormality
 
-def children_of(ctx: RunContext[HPOADependencies], parent: str) -> List[str]:
+async def children_of(ctx: RunContext[HPOADependencies], parent: str) -> List[str]:
     """Direct children = subjects of subclass edges pointing to parent.
 
     Note: synchronous helper (no awaiting needed).
     """
     config = ctx.deps or get_config()
-    hp = config.get_hp_adapter()
+    if "hp" in parent.lower():
+        onto = config.get_hp_adapter()
+    elif "mondo" in parent.lower():
+        onto = config.get_mondo_adapter()
+    else: 
+        raise ValueError(f"Parent not an HP or MONDO ID: {parent}")
     try:
-        return [s for s, p, o in hp.relationships(objects=[parent])]
+        return [s for s, p, o in onto.relationships(objects=[parent])]
     except Exception:
         return []
 
-def parents_of(ctx: RunContext[HPOADependencies], child: str) -> List[str]:
+async def parents_of(ctx: RunContext[HPOADependencies], child: str) -> List[str]:
     """Direct parents = objects of subclass edges from child.
 
     Note: synchronous helper (no awaiting needed).
     """
     config = ctx.deps or get_config()
-    hp = config.get_hp_adapter()
+    if "hp" in child.lower():
+        onto = config.get_hp_adapter()
+    elif "mondo" in child.lower():
+        onto = config.get_mondo_adapter()
+    else: 
+        raise ValueError(f"Child not an HP or MONDO ID: {child}")
     try:
-        return [o for s, p, o in hp.relationships(subjects=[child])]
+        return [o for s, p, o in onto.relationships(subjects=[child])]
     except Exception:
         return []
 
@@ -384,7 +394,7 @@ async def categorize_hpo(ctx: RunContext[HPOADependencies], term: str) -> List[s
     """
     config = ctx.deps or get_config()
     hp = config.get_hp_adapter()
-    systems = children_of(ctx, HP_SYSTEM_ROOT)
+    systems = await children_of(ctx, HP_SYSTEM_ROOT)
     try:
         ancestors = set(hp.ancestors(term, reflexive=True) or [])
     except Exception:
