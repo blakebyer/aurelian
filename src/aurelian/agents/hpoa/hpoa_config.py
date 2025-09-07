@@ -362,7 +362,6 @@ def get_config() -> HPOADependencies:
         workdir=workdir
     )    
 
-
 def _read_hpoa_from_path(path: str) -> List[Dict[str, str]]:
     """Read a local phenotype.hpoa TSV file preserving columns."""
     with open(path, "r", encoding="utf-8") as fh:

@@ -128,8 +128,8 @@ class ToolLimiter:
         return wrapper
     
 def create_context(messages: list[ModelMessage], n_messages: int = 2) -> list[ModelMessage]:
-      """Remove all but the last n_messages messages to keep context."""
-      return [msg for msg in messages if isinstance(msg, TextPart) or isinstance(msg, UserPromptPart)][-n_messages:]
+      """Remove all but the previous n_messages messages to keep context."""
+      return messages[-n_messages:]
 
 # Configure OpenAI reasoning model with summary to expose in responses
 oai_model = OpenAIResponsesModel("gpt-5-mini")
@@ -242,26 +242,29 @@ def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int
 def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 50):
   global MSG_HISTORY  
   try:
-        result = agent.run_sync(
-            input,
-            deps=get_slim_config(),
-            message_history=MSG_HISTORY or None,
-            usage_limits=UsageLimits(request_limit=tool_limit),
-        )
+      result = agent.run_sync(
+          input,
+          deps=get_slim_config(),
+          message_history=MSG_HISTORY or None,
+          usage_limits=UsageLimits(request_limit=tool_limit),
+      )
 
-        # append the new messages
-        MSG_HISTORY.extend(result.new_messages())
+      # append the new messages
+      MSG_HISTORY.extend(result.new_messages())
 
-        # save whole history as pretty JSON
-        HISTORY_PATH.write_bytes(
-            ModelMessagesTypeAdapter.dump_json(MSG_HISTORY, indent=2)
-        )
+      # save whole history as pretty JSON
+      HISTORY_PATH.write_bytes(
+          ModelMessagesTypeAdapter.dump_json(MSG_HISTORY, indent=2)
+      )
+      return result
   finally:
-        # close shared HTTP client after each completion to reduce idle sockets
-        # and ensure fresh client per user request/session
-        import anyio
-        try:
-            anyio.run(close_client)
-        except Exception:
-            pass
+      # close shared HTTP client after each completion to reduce idle sockets
+      # and ensure fresh client per user request/session
+      import anyio
+      try:
+          anyio.run(close_client)
+      except Exception:
+          pass
  
+test = call_agent_with_retry("What is HP:0004322 and what are its parents and children?", agent = hpoa_simple_agent)
+print(test)
