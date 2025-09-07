@@ -328,7 +328,30 @@ class HPOADependencies(HasWorkdir):
             con.commit()
         finally:
             con.close()
-    
+
+@dataclass
+class SlimConfig:
+    """Minimal config that only wires up ontology adapters."""
+    _hp_adapter: Optional[BasicOntologyInterface] = field(default=None, init=False, repr=False)
+    _mondo_adapter: Optional[BasicOntologyInterface] = field(default=None, init=False, repr=False)
+
+    def get_hp_adapter(self) -> BasicOntologyInterface:
+        """Get Human Phenotype Ontology adapter."""
+        global _HP_ADAPTER_SINGLETON
+        if _HP_ADAPTER_SINGLETON is None:
+            _HP_ADAPTER_SINGLETON = get_adapter("sqlite:obo:hp")
+        return _HP_ADAPTER_SINGLETON
+
+    def get_mondo_adapter(self) -> BasicOntologyInterface:
+        """Get Mondo Disease Ontology adapter."""
+        global _MONDO_ADAPTER_SINGLETON
+        if _MONDO_ADAPTER_SINGLETON is None:
+            _MONDO_ADAPTER_SINGLETON = get_adapter("sqlite:obo:mondo")
+        return _MONDO_ADAPTER_SINGLETON
+
+def get_slim_config() -> SlimConfig:
+    """Factory for SlimConfig with ontology-only adapters."""
+    return SlimConfig()
     
 def get_config() -> HPOADependencies:
     """Get the HPOA configuration from environment variables or defaults."""

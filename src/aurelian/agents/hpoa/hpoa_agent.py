@@ -7,7 +7,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, TextPart, UserPromptPart 
-from aurelian.agents.hpoa.hpoa_config import HPOAMixedResponse, get_config, close_client
+from aurelian.agents.hpoa.hpoa_config import HPOAMixedResponse, get_config, get_slim_config, close_client
 from aurelian.agents.hpoa.hpoa_tools import (
     search_hp,
     search_mondo,
@@ -170,6 +170,7 @@ hpoa_simple_agent = Agent(
     model="gpt-5-mini",
     output_type=Optional[str],
     system_prompt=HPOA_SIMPLE_SYSTEM_PROMPT,
+    history_processors=[create_context],
     tools=[
         Tool(ToolLimiter(search_hp, max_calls=10).wrap()),
         Tool(ToolLimiter(categorize_hpo, max_calls=3).wrap()),
@@ -210,14 +211,14 @@ hpoa_agent = Agent(
 # retry logic for transient API errors (shorter backoff)
 @retry(wait=wait_random_exponential(min=0, max=10), stop=stop_after_attempt(3),
        retry=retry_if_exception_type(ModelHTTPError))
-def call_agent_with_retry(input: str):
+def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int = 75):
     global MSG_HISTORY  
     try:
-        result = hpoa_agent.run_sync(
+        result = agent.run_sync(
             input,
             deps=get_config(),
             message_history=MSG_HISTORY or None,
-            usage_limits=UsageLimits(request_limit=75),
+            usage_limits=UsageLimits(request_limit=tool_limit),
         )
 
         # append the new messages
@@ -237,3 +238,30 @@ def call_agent_with_retry(input: str):
             anyio.run(close_client)
         except Exception:
             pass
+        
+def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 50):
+  global MSG_HISTORY  
+  try:
+        result = agent.run_sync(
+            input,
+            deps=get_slim_config(),
+            message_history=MSG_HISTORY or None,
+            usage_limits=UsageLimits(request_limit=tool_limit),
+        )
+
+        # append the new messages
+        MSG_HISTORY.extend(result.new_messages())
+
+        # save whole history as pretty JSON
+        HISTORY_PATH.write_bytes(
+            ModelMessagesTypeAdapter.dump_json(MSG_HISTORY, indent=2)
+        )
+  finally:
+        # close shared HTTP client after each completion to reduce idle sockets
+        # and ensure fresh client per user request/session
+        import anyio
+        try:
+            anyio.run(close_client)
+        except Exception:
+            pass
+ 
