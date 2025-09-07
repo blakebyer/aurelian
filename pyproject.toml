@@ -59,7 +59,6 @@ gradio = ["gradio"]
 bioservices = ["bioservices"]
 linkml = ["linkml"]
 chem = ["rdkit"]
-pdfminer = ["pdfminer-six"]
 pypaperbot = ["pypaperbot"]
 
 [tool.pytest.ini_options]
