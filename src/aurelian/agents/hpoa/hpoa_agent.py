@@ -2,6 +2,7 @@
 Agent for working with .hpoa files.
 """
 from pathlib import Path
+from pydantic_ai import Agent
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, TextPart, UserPromptPart 
