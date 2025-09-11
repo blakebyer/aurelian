@@ -226,14 +226,11 @@ hpoa_agent = Agent(
        retry=retry_if_exception_type(ModelHTTPError))
 def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int = 75):
     try:
-        history = MSG_HISTORY[-MAX_HISTORY:] if MSG_HISTORY else None
-        processors = [create_context] if history else None
         result = agent.run_sync(
             input,
             deps=get_config(),
             usage_limits=UsageLimits(request_limit=tool_limit),
-            message_history=history,
-            history_processors=processors
+            message_history=MSG_HISTORY or None
         )
         append_new_text_messages(result.new_messages())
         return result
@@ -246,13 +243,10 @@ def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int
 
 def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 50):
     try:
-        history = MSG_HISTORY[-MAX_HISTORY:] if MSG_HISTORY else None
-        processors = [create_context] if history else None
         result = agent.run_sync(
             input,
             deps=get_slim_config(),
-            message_history=history,
-            history_processors=processors,   # none on first run
+            message_history=MSG_HISTORY or None,
             usage_limits=UsageLimits(request_limit=tool_limit),
         )
         append_new_text_messages(result.new_messages())
