@@ -132,10 +132,10 @@ def create_context(messages: List[ModelMessage]) -> List[ModelMessage]:
     filtered = [m for m in messages if isinstance(m, (TextPart, UserPromptPart))]
     if filtered:
         return filtered[-MAX_HISTORY:]
-    # if filtering wiped everything, fall back to last message (if any)
-    return messages[-1:] if messages else []
+    # if filtering wiped everything, return empty (never return a tool)
+    return []
 
-def append_new_text_messages(new_msgs: List[ModelMessage]) -> None:
+def append_new_messages(new_msgs: List[ModelMessage]) -> None:
     global MSG_HISTORY
     for m in new_msgs:
         if isinstance(m, (TextPart, UserPromptPart)):
@@ -232,7 +232,7 @@ def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int
             usage_limits=UsageLimits(request_limit=tool_limit),
             message_history=MSG_HISTORY or None
         )
-        append_new_text_messages(result.new_messages())
+        append_new_messages(result.new_messages())
         return result
     finally:
         try:
@@ -249,7 +249,7 @@ def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 5
             message_history=MSG_HISTORY or None,
             usage_limits=UsageLimits(request_limit=tool_limit),
         )
-        append_new_text_messages(result.new_messages())
+        append_new_messages(result.new_messages())
         return result
     finally:
         try:
