@@ -7,7 +7,7 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, TextPart, UserPromptPart 
-from aurelian.agents.hpoa.hpoa_config import HPOAMixedResponse, get_config, get_slim_config, close_client
+from aurelian.agents.hpoa.hpoa_config import HPOAMixedResponse, get_config, close_client
 from aurelian.agents.hpoa.hpoa_tools import (
     search_hp,
     search_mondo,
@@ -245,7 +245,7 @@ def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 5
     try:
         result = agent.run_sync(
             input,
-            deps=get_slim_config(),
+            deps=get_config(),
             message_history=MSG_HISTORY or None,
             usage_limits=UsageLimits(request_limit=tool_limit),
         )

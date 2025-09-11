@@ -14,8 +14,8 @@ from datetime import date
 from aurelian.dependencies.workdir import HasWorkdir, WorkDir
 
 # Module-level singletons for ontology adapters to avoid repeated loads
-_HP_ADAPTER_SINGLETON: Optional[BasicOntologyInterface] = None
-_MONDO_ADAPTER_SINGLETON: Optional[BasicOntologyInterface] = None
+HP_ADAPTER_SINGLETON: Optional[BasicOntologyInterface] = None
+MONDO_ADAPTER_SINGLETON: Optional[BasicOntologyInterface] = None
 
 class HPOA(BaseModel):
     database_id: str = Field(..., description="Refers to the database `disease_name` is drawn from. Must be formatted as a CURIE, e.g., OMIM:1547800 or MONDO:0021190")
@@ -101,19 +101,19 @@ class HPOADependencies(HasWorkdir):
     def get_mondo_adapter(self) -> BasicOntologyInterface:
         """Get a configured Mondo adapter."""
         # Use module-level singleton to avoid reloading per instance
-        global _MONDO_ADAPTER_SINGLETON
-        if _MONDO_ADAPTER_SINGLETON is None:
-            _MONDO_ADAPTER_SINGLETON = get_adapter("sqlite:obo:mondo")
-        return _MONDO_ADAPTER_SINGLETON
+        global MONDO_ADAPTER_SINGLETON
+        if MONDO_ADAPTER_SINGLETON is None:
+            MONDO_ADAPTER_SINGLETON = get_adapter("sqlite:obo:mondo")
+        return MONDO_ADAPTER_SINGLETON
         #return get_adapter("ontobee:mondo")
     
     def get_hp_adapter(self) -> BasicOntologyInterface:
         """Get a configured HPO adapter."""
         # Use module-level singleton to avoid reloading per instance
-        global _HP_ADAPTER_SINGLETON
-        if _HP_ADAPTER_SINGLETON is None:
-            _HP_ADAPTER_SINGLETON = get_adapter("sqlite:obo:hp")
-        return _HP_ADAPTER_SINGLETON
+        global HP_ADAPTER_SINGLETON
+        if HP_ADAPTER_SINGLETON is None:
+            HP_ADAPTER_SINGLETON = get_adapter("sqlite:obo:hp")
+        return HP_ADAPTER_SINGLETON
         #return get_adapter("ontobee:hp")
     
     async def fetch_and_parse_hpoa(self, path: Optional[str] = None) -> List[Dict[str, str]]:
@@ -329,30 +329,6 @@ class HPOADependencies(HasWorkdir):
         finally:
             con.close()
 
-@dataclass
-class SlimConfig:
-    """Minimal config that only wires up ontology adapters."""
-    _hp_adapter: Optional[BasicOntologyInterface] = field(default=None, init=False, repr=False)
-    _mondo_adapter: Optional[BasicOntologyInterface] = field(default=None, init=False, repr=False)
-
-    def get_hp_adapter(self) -> BasicOntologyInterface:
-        """Get Human Phenotype Ontology adapter."""
-        global _HP_ADAPTER_SINGLETON
-        if _HP_ADAPTER_SINGLETON is None:
-            _HP_ADAPTER_SINGLETON = get_adapter("sqlite:obo:hp")
-        return _HP_ADAPTER_SINGLETON
-
-    def get_mondo_adapter(self) -> BasicOntologyInterface:
-        """Get Mondo Disease Ontology adapter."""
-        global _MONDO_ADAPTER_SINGLETON
-        if _MONDO_ADAPTER_SINGLETON is None:
-            _MONDO_ADAPTER_SINGLETON = get_adapter("sqlite:obo:mondo")
-        return _MONDO_ADAPTER_SINGLETON
-
-def get_slim_config() -> SlimConfig:
-    """Factory for SlimConfig with ontology-only adapters."""
-    return SlimConfig()
-    
 def get_config() -> HPOADependencies:
     """Get the HPOA configuration from environment variables or defaults."""
     workdir_path = os.environ.get("AURELIAN_WORKDIR", None)
@@ -396,5 +372,3 @@ async def close_client() -> None:
             await _async_client.aclose()
         finally:
             _async_client = None
-
-
