@@ -29,6 +29,7 @@ from typing import List, Optional
 from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
 import inspect
 from functools import wraps
+import anyio
 
 HPOA_SYSTEM_PROMPT = ("""You are an expert biocurator for HPO/MONDO/OMIM. Default to fast, conversational Q&A; switch to curation only when explicitly asked. If unclear, ask one short clarifying question.
 
@@ -86,15 +87,14 @@ Tools (only when explicitly relevant)
 
 Workflow
 1) Q&A:
-   - Disease?phenotypes: one HPOA call (filter_hpoa / filter_hpoa_by_pmid / filter_hpoa_by_hp); optionally categorize_hpo
+   - Disease->phenotypes: one HPOA call (filter_hpoa / filter_hpoa_by_pmid / filter_hpoa_by_hp); optionally categorize_hpo
    - Phenotype concept: use only ontology tools (search_hp/search_mondo)
    - No tools for general/off-topic questions
-   - Summarize up to 10; leave annotations empty; do not call literature/OMIM tools
-   - If a user asks a question, try to answer it. Do not say you are "going to" do something and terminate.
+   - Summarize up to 10; leave annotations empty; DO NOT call literature/OMIM tools
+   - If a user asks a question, try to answer it. DO NOT say you are "going to" do something and terminate.
 2) Curation (on request): use search_mondo/get_omim_terms/search_hp/pubmed_search_pmids/lookup_pmid sparingly; return 10 or fewer annotations + short explanation.
 3) Be conservative and transparent; acceptable to propose no changes
-4) Include onset/frequency/sex only when supported by HPOA or explicit evidence in curation"""
-)
+4) Include onset/frequency/sex only when supported by HPOA or explicit evidence in curation""")
 
 HPOA_SIMPLE_SYSTEM_PROMPT = ("""You are an expert biocurator for HPO & MONDO, who can also answer questions about biology, medicine, and human diseases and phenotypes. Default to fast, conversational Q&A; use search_hp(HP:refID or phenotype label) to return information about an HPO term (including ID, label, and definition), use categorize_hpo to return the category of an HPO term, use search_mondo(MONDO:refID OR disease label) to return information about a MONDO term (including ID, label, and definition), and categorize_mondo to return the organ system of a MONDO term or disease label.
 Use children_of(HP:refID) or parents_of(HP:refID) to get direct children or parents of an HPO term.
@@ -104,8 +104,9 @@ When listing ontology terms, always include both the ID and label, the label enc
 Do NOT call tools unless necessary. Absolutely no hallucinations, the ontology IDs, labels, and definitions must come from the tools. If a user provides an invalid ID or label, say you cannot find it.
 If unclear, ask one short clarifying question. If the user asks an off-topic question, politely decline and remind them of your scope. Be brief and direct.""")
 
-MSG_HISTORY: list[ModelMessage] = []  # keep last few messages for context
+MSG_HISTORY: List[ModelMessage] = []   # only TextPart + UserPromptPart
 HISTORY_PATH = Path("history.json")
+MAX_HISTORY = 3
 
 class ToolLimiter:
     def __init__(self, func, max_calls: int):
@@ -127,9 +128,23 @@ class ToolLimiter:
         wrapper.__signature__ = sig  # keep schema for Pydantic-AI
         return wrapper
     
-def create_context(messages: list[ModelMessage], n_messages: int = 2) -> list[ModelMessage]:
-      """Remove all but the previous n_messages messages to keep context."""
-      return messages[-n_messages:]
+def create_context(messages: List[ModelMessage]) -> List[ModelMessage]:
+    """
+    pydantic-ai-compatible history processor:
+    - first parameter name MUST be `messages`
+    - MUST have a concrete runtime type hint for `messages`
+    - returns List[ModelMessage]
+    """
+    filtered = [m for m in messages if isinstance(m, (TextPart, UserPromptPart))]
+    return filtered[-MAX_HISTORY:]
+
+def append_new_text_messages(new_msgs: List[ModelMessage]) -> None:
+    global MSG_HISTORY
+    for m in new_msgs:
+        if isinstance(m, (TextPart, UserPromptPart)):
+            MSG_HISTORY.append(m)
+    if len(MSG_HISTORY) > MAX_HISTORY:
+        MSG_HISTORY = MSG_HISTORY[-MAX_HISTORY:]
 
 # Configure OpenAI reasoning model with summary to expose in responses
 oai_model = OpenAIResponsesModel("gpt-5-mini")
@@ -209,59 +224,37 @@ hpoa_agent = Agent(
 )
 
 # retry logic for transient API errors (shorter backoff)
-@retry(wait=wait_random_exponential(min=0, max=10), stop=stop_after_attempt(3),
+@retry(wait=wait_random_exponential(min=0, max=10),
+       stop=stop_after_attempt(3),
        retry=retry_if_exception_type(ModelHTTPError))
 def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int = 75):
-    global MSG_HISTORY  
     try:
         result = agent.run_sync(
             input,
             deps=get_config(),
-            message_history=MSG_HISTORY or None,
             usage_limits=UsageLimits(request_limit=tool_limit),
         )
-
-        # append the new messages
-        MSG_HISTORY.extend(result.new_messages())
-
-        # save whole history as pretty JSON
-        HISTORY_PATH.write_bytes(
-            ModelMessagesTypeAdapter.dump_json(MSG_HISTORY, indent=2)
-        )
-
+        append_new_text_messages(result.new_messages())
         return result
     finally:
-        # close shared HTTP client after each completion to reduce idle sockets
-        # and ensure fresh client per user request/session
-        import anyio
         try:
             anyio.run(close_client)
         except Exception:
             pass
-        
+
+
 def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 50):
-  global MSG_HISTORY  
-  try:
-      result = agent.run_sync(
-          input,
-          deps=get_slim_config(),
-          message_history=MSG_HISTORY or None,
-          usage_limits=UsageLimits(request_limit=tool_limit),
-      )
-
-      # append the new messages
-      MSG_HISTORY.extend(result.new_messages())
-
-      # save whole history as pretty JSON
-      HISTORY_PATH.write_bytes(
-          ModelMessagesTypeAdapter.dump_json(MSG_HISTORY, indent=2)
-      )
-      return result
-  finally:
-      # close shared HTTP client after each completion to reduce idle sockets
-      # and ensure fresh client per user request/session
-      import anyio
-      try:
-          anyio.run(close_client)
-      except Exception:
-          pass
+    try:
+        result = agent.run_sync(
+            input,
+            deps=get_slim_config(),
+            message_history=create_context(MSG_HISTORY),   # session-only, text-only
+            usage_limits=UsageLimits(request_limit=tool_limit),
+        )
+        append_new_text_messages(result.new_messages())
+        return result
+    finally:
+        try:
+            anyio.run(close_client)
+        except Exception:
+            pass
