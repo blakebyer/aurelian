@@ -145,7 +145,7 @@ def save_history() -> None:
         # If writing fails, ignore silently
         pass
 
-MAX_HISTORY = 3 # 3 messages of history
+MAX_HISTORY = 3 #  messages of history
 
 def create_context(messages: list[ModelMessage]) -> list[ModelMessage]:
     """Trim the message history for context but preserve the system prompt.
@@ -287,9 +287,6 @@ def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int
         else:
             append_new_messages(result.new_messages())
         return result
-    except Exception as e:
-        # Any other error (connection issues, type errors, etc.)
-        return e
     finally:
         try:
             anyio.run(close_client)
@@ -314,9 +311,6 @@ def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 5
         else:
             append_new_messages(result.new_messages())
         return result
-    except Exception as e:
-        # Any other error (connection issues, type errors, etc.)
-        return e
     finally:
         try:
             anyio.run(close_client)
