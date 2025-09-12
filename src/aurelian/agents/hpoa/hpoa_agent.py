@@ -286,9 +286,12 @@ def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int
             append_new_messages(result.new_messages())
         return result
     except RetryError as re:
-        # unwrap the underlying ModelHTTPError (or whatever exception)
         err = re.last_attempt.exception()
-        return err  # let chatbot_app show str(err)
+        if isinstance(err, ModelHTTPError):
+            # Unwrap and show details instead of cryptic RetryError
+            return RuntimeError(f"ModelHTTPError: status={err.status_code}, body={err.body}")
+        # Fallback: return the actual inner exception
+        return err
     finally:
         try:
             anyio.run(close_client)
