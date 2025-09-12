@@ -8,7 +8,7 @@ from pathlib import Path
 from functools import wraps
 from typing import List, Optional
 import anyio
-from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
+from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type, RetryError
 from pydantic_ai import Agent, Tool
 from pydantic_ai.messages import (
     ModelMessage,
@@ -158,9 +158,9 @@ def create_context(messages: list[ModelMessage]) -> list[ModelMessage]:
     if not messages:
         return messages
     # Slice: head is first message, tail is last MAX_HISTORY messages
-    head = messages[:1]
+    #head = messages[:1]
     tail = messages[-MAX_HISTORY:]
-    return head + tail
+    return tail
 
 def append_new_messages(new_msgs: List[ModelMessage]) -> None:
     """Append new messages to the global history and persist them.
@@ -285,6 +285,10 @@ def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int
         else:
             append_new_messages(result.new_messages())
         return result
+    except RetryError as re:
+        # unwrap the underlying ModelHTTPError (or whatever exception)
+        err = re.last_attempt.exception()
+        return err  # let chatbot_app show str(err)
     finally:
         try:
             anyio.run(close_client)
