@@ -6,7 +6,15 @@ from pydantic_ai import Agent
 from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter, TextPart, UserPromptPart 
+from pydantic_ai.messages import (
+    ModelMessage, 
+    ModelMessagesTypeAdapter,
+    UserPrompt,
+    ModelResponse,
+    SystemPrompt,
+    TextPart,
+    UserPromptPart
+)
 from aurelian.agents.hpoa.hpoa_config import HPOAMixedResponse, get_config, close_client
 from aurelian.agents.hpoa.hpoa_tools import (
     search_hp,
@@ -22,10 +30,10 @@ from aurelian.agents.hpoa.hpoa_tools import (
     categorize_mondo,
     children_of,
     parents_of
-    )
+)
 from pydantic_ai import Agent, Tool
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
-from typing import List, Optional
+from typing import List, Optional, Union
 from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
 import inspect
 from functools import wraps
@@ -104,7 +112,8 @@ When listing ontology terms, always include both the ID and label, the label enc
 Do NOT call tools unless necessary. Absolutely no hallucinations, the ontology IDs, labels, and definitions must come from the tools. If a user provides an invalid ID or label, say you cannot find it.
 If unclear, ask one short clarifying question. If the user asks an off-topic question, politely decline and remind them of your scope. Be brief and direct.""")
 
-MSG_HISTORY: List[ModelMessage] = []   # only TextPart + UserPromptPart
+# Initialize with None - will only contain proper ModelMessage objects
+MSG_HISTORY: Optional[List[ModelMessage]] = None
 HISTORY_PATH = Path("history.json")
 MAX_HISTORY = 3
 
@@ -129,18 +138,34 @@ class ToolLimiter:
         return wrapper
     
 def create_context(messages: List[ModelMessage]) -> List[ModelMessage]:
-    """Return only the last MAX_HISTORY text (user/assistant) messages."""
-    safe_history = [m for m in messages if isinstance(m, (TextPart, UserPromptPart))]
-    if len(safe_history) > MAX_HISTORY:
-        safe_history = safe_history[-MAX_HISTORY:]
+    """Return only the last MAX_HISTORY messages, keeping proper ModelMessage types."""
+    # Filter to keep only UserPrompt and ModelResponse messages
+    safe_history = []
+    for m in messages:
+        if isinstance(m, (UserPrompt, ModelResponse)):
+            safe_history.append(m)
+    
+    # Keep only the last MAX_HISTORY exchanges
+    if len(safe_history) > MAX_HISTORY * 2:  # Each exchange is user + assistant
+        safe_history = safe_history[-(MAX_HISTORY * 2):]
+    
     return safe_history
 
 def append_new_messages(new_msgs: List[ModelMessage]) -> None:
+    """Append new messages to history, keeping only valid ModelMessage types."""
     global MSG_HISTORY
-    # Append only text content (assistant text + user text)
+    
+    if MSG_HISTORY is None:
+        MSG_HISTORY = []
+    
+    # Append only UserPrompt and ModelResponse messages
     for m in new_msgs:
-        if isinstance(m, (TextPart, UserPromptPart)):
+        if isinstance(m, (UserPrompt, ModelResponse)):
             MSG_HISTORY.append(m)
+    
+    # Trim history if it gets too long
+    if len(MSG_HISTORY) > MAX_HISTORY * 2:
+        MSG_HISTORY = MSG_HISTORY[-(MAX_HISTORY * 2):]
 
 # Configure OpenAI reasoning model with summary to expose in responses
 oai_model = OpenAIResponsesModel("gpt-5-mini")
@@ -229,7 +254,7 @@ def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int
             input,
             deps=get_config(),
             usage_limits=UsageLimits(request_limit=tool_limit),
-            message_history=MSG_HISTORY or None
+            message_history=MSG_HISTORY  # Pass None on first call, list afterwards
         )
         append_new_messages(result.new_messages())
         return result
@@ -245,7 +270,7 @@ def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 5
         result = agent.run_sync(
             input,
             deps=get_config(),
-            message_history=MSG_HISTORY or None,
+            message_history=MSG_HISTORY,  # Pass None on first call, list afterwards
             usage_limits=UsageLimits(request_limit=tool_limit),
         )
         append_new_messages(result.new_messages())
@@ -255,7 +280,3 @@ def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 5
             anyio.run(close_client)
         except Exception:
             pass
-        
-
-test = call_agent_with_retry("Return the phenotypes for PMID:19473999.")
-print(test)
