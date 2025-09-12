@@ -259,8 +259,8 @@ hpoa_simple_agent = Agent(
 )
 
 # retry to avoid transient API errors
-@retry(wait=wait_random_exponential(min=0, max=10),
-       stop=stop_after_attempt(3),
+@retry(wait=wait_random_exponential(min=0, max=30),
+       stop=stop_after_attempt(4),
        retry=retry_if_exception_type(ModelHTTPError))
 def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int = 75):
     """Run an agent synchronously with retry and history persistence.
