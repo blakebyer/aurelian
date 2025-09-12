@@ -1,18 +1,22 @@
 """
 Agent for working with .hpoa files.
 """
+from __future__ import annotations
+import datetime
+import inspect
 from pathlib import Path
-from pydantic_ai import Agent
-from pydantic_ai.models import Model
+from functools import wraps
+from typing import List, Optional
+import anyio
+from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
+from pydantic_ai import Agent, Tool
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelMessagesTypeAdapter,
+)
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import ModelHTTPError
-from pydantic_ai.messages import (
-    ModelMessage, 
-    ModelMessagesTypeAdapter,
-    ModelResponse,
-    TextPart,
-    UserPromptPart
-)
+from pydantic_core import to_json
 from aurelian.agents.hpoa.hpoa_config import HPOAMixedResponse, get_config, close_client
 from aurelian.agents.hpoa.hpoa_tools import (
     search_hp,
@@ -27,16 +31,12 @@ from aurelian.agents.hpoa.hpoa_tools import (
     categorize_hpo,
     categorize_mondo,
     children_of,
-    parents_of
+    parents_of,
 )
-from pydantic_ai import Agent, Tool
+# import reasoning models
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
-from typing import List, Optional, Union
-from tenacity import retry, wait_random_exponential, stop_after_attempt, retry_if_exception_type
-import inspect
-from functools import wraps
-import anyio
 
+# system prompts
 HPOA_SYSTEM_PROMPT = ("""You are an expert biocurator for HPO/MONDO/OMIM. Default to fast, conversational Q&A; switch to curation only when explicitly asked. If unclear, ask one short clarifying question.
 
 Output Contract
@@ -102,6 +102,7 @@ Workflow
 3) Be conservative and transparent; acceptable to propose no changes
 4) Include onset/frequency/sex only when supported by HPOA or explicit evidence in curation""")
 
+# This simpler prompt is used for the "simple" agent variant.
 HPOA_SIMPLE_SYSTEM_PROMPT = ("""You are an expert biocurator for HPO & MONDO, who can also answer questions about biology, medicine, and human diseases and phenotypes. Default to fast, conversational Q&A; use search_hp(HP:refID or phenotype label) to return information about an HPO term (including ID, label, and definition), use categorize_hpo to return the category of an HPO term, use search_mondo(MONDO:refID OR disease label) to return information about a MONDO term (including ID, label, and definition), and categorize_mondo to return the organ system of a MONDO term or disease label.
 Use children_of(HP:refID) or parents_of(HP:refID) to get direct children or parents of an HPO term.
 Use children_of(MONDO:refID) or parents_of(MONDO:refID) to get direct children or parents of a MONDO term.
@@ -110,10 +111,72 @@ When listing ontology terms, always include both the ID and label, the label enc
 Do NOT call tools unless necessary. Absolutely no hallucinations, the ontology IDs, labels, and definitions must come from the tools. If a user provides an invalid ID or label, say you cannot find it.
 If unclear, ask one short clarifying question. If the user asks an off-topic question, politely decline and remind them of your scope. Be brief and direct.""")
 
+# ---------------------------------------------------------------------------
+# History persistence
+# ---------------------------------------------------------------------------
 MSG_HISTORY: list[ModelMessage] = []
-HISTORY_PATH = Path("history.json")
-MAX_HISTORY = 3
 
+# create history directory and history file per session
+HISTORY_FOLDER = Path("history")
+HISTORY_FOLDER.mkdir(exist_ok=True)
+SESSION_FILENAME = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+SESSION_HISTORY_FILE = HISTORY_FOLDER / f"history_{SESSION_FILENAME}.json"
+
+def load_history() -> None:
+    """Populate MSG_HISTORY from the session history file if it exists."""
+    global MSG_HISTORY
+    if SESSION_HISTORY_FILE.exists():
+        try:
+            data = SESSION_HISTORY_FILE.read_bytes()
+            # Use Pydantic AI's adapter to convert JSON bytes into
+            # ModelMessage objects.
+            MSG_HISTORY = ModelMessagesTypeAdapter.validate_json(data)
+        except Exception:
+            MSG_HISTORY = []
+    # If the file doesn't exist, leave MSG_HISTORY as-is (empty)
+
+def save_history() -> None:
+    """Write the current MSG_HISTORY to the session history file."""
+    try:
+        # Convert the list of ModelMessage objects to JSON bytes and
+        # write them to the file.
+        SESSION_HISTORY_FILE.write_bytes(to_json(MSG_HISTORY))
+    except Exception:
+        # If writing fails, ignore silently
+        pass
+
+MAX_HISTORY = 12
+
+def create_context(messages: list[ModelMessage]) -> list[ModelMessage]:
+    """Trim the message history for context but preserve the system prompt.
+
+    This function takes the full list of messages and returns a new list
+    where the first message (which should contain the system prompt) is
+    preserved, and only the last MAX_HISTORY messages are kept. If the
+    input list has fewer than MAX_HISTORY+1 entries, it returns the
+    original list unchanged.
+    """
+    # Always return empty or original lists unchanged
+    if not messages:
+        return messages
+    # Slice: head is first message, tail is last MAX_HISTORY messages
+    head = messages[:1]
+    tail = messages[-MAX_HISTORY:]
+    return head + tail
+
+def append_new_messages(new_msgs: List[ModelMessage]) -> None:
+    """Append new messages to the global history and persist them.
+
+    Any messages appended here will be saved to the session file so
+    they are available on subsequent calls in the same session.
+    """
+    global MSG_HISTORY
+    # Extend the in-memory history with new messages
+    MSG_HISTORY.extend(new_msgs)
+    # Immediately save to disk so the history is durable
+    save_history()
+
+# Tool limiter helper class
 class ToolLimiter:
     def __init__(self, func, max_calls: int):
         self.func = func
@@ -126,30 +189,19 @@ class ToolLimiter:
         @wraps(self.func)
         async def wrapper(*args, **kwargs):
             if self.calls >= self.max_calls:
-                # Instead of crashing, return an error dict the model can see
                 return {"error": f"{self.func.__name__} exceeded {self.max_calls} calls"}
             self.calls += 1
             return await self.func(*args, **kwargs)
 
-        wrapper.__signature__ = sig  # keep schema for Pydantic-AI
+        wrapper.__signature__ = sig
         return wrapper
-    
-def create_context(messages: list[ModelMessage]) -> list[ModelMessage]: 
-    """Keep only the last X messages to manage token usage.""" 
-    return messages[-MAX_HISTORY:] if len(messages) > MAX_HISTORY else messages
 
-def append_new_messages(new_msgs: list[ModelMessage]) -> None:
-    """Append all new messages (user, assistant, tool, etc.)."""
-    global MSG_HISTORY
-    MSG_HISTORY.extend(new_msgs)
-
-# Configure OpenAI reasoning model with summary to expose in responses
+# Reasoning agent (not used in typical flows but available)
 oai_model = OpenAIResponsesModel("gpt-5-mini")
 oai_settings = OpenAIResponsesModelSettings(
     openai_reasoning_effort="low",
     openai_reasoning_summary="concise",
 )
-
 hpoa_reasoning_agent = Agent(
     model=oai_model,
     model_settings=oai_settings,
@@ -157,27 +209,42 @@ hpoa_reasoning_agent = Agent(
     system_prompt=HPOA_SYSTEM_PROMPT,
     history_processors=[create_context],
     tools=[
-        # filtering
         Tool(ToolLimiter(filter_hpoa, max_calls=3).wrap()),
         Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=3).wrap()),
         Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=3).wrap()),
-
-        # phenotype lookup
         Tool(ToolLimiter(search_hp, max_calls=25).wrap()),
         Tool(ToolLimiter(categorize_hpo, max_calls=25).wrap()),
         Tool(ToolLimiter(categorize_mondo, max_calls=3).wrap()),
-
-        # disease lookup
         Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
         Tool(ToolLimiter(search_mondo, max_calls=3).wrap()),
-
-        # curation tools
         Tool(ToolLimiter(get_omim_clinical, max_calls=3).wrap()),
         Tool(ToolLimiter(lookup_pmid_text, max_calls=3).wrap()),
         Tool(ToolLimiter(pubmed_search_pmids, max_calls=3).wrap()),
     ],
 )
 
+# Main agent used for curation and Q&A
+hpoa_agent = Agent(
+    model="gpt-5-mini",
+    output_type=HPOAMixedResponse,
+    system_prompt=HPOA_SYSTEM_PROMPT,
+    history_processors=[create_context],
+    tools=[
+        Tool(ToolLimiter(filter_hpoa, max_calls=3).wrap()),
+        Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=3).wrap()),
+        Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=3).wrap()),
+        Tool(ToolLimiter(search_hp, max_calls=25).wrap()),
+        Tool(ToolLimiter(categorize_hpo, max_calls=25).wrap()),
+        Tool(ToolLimiter(categorize_mondo, max_calls=3).wrap()),
+        Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
+        Tool(ToolLimiter(search_mondo, max_calls=3).wrap()),
+        Tool(ToolLimiter(get_omim_clinical, max_calls=3).wrap()),
+        Tool(ToolLimiter(lookup_pmid_text, max_calls=3).wrap()),
+        Tool(ToolLimiter(pubmed_search_pmids, max_calls=3).wrap()),
+    ],
+)
+
+# Simplified agent used for ontology lookups and quick answers
 hpoa_simple_agent = Agent(
     model="gpt-5-mini",
     output_type=Optional[str],
@@ -190,49 +257,35 @@ hpoa_simple_agent = Agent(
         Tool(ToolLimiter(categorize_mondo, max_calls=3).wrap()),
         Tool(ToolLimiter(children_of, max_calls=3).wrap()),
         Tool(ToolLimiter(parents_of, max_calls=3).wrap()),
-    ]
+    ],
 )
 
-hpoa_agent = Agent(
-    model="gpt-5-mini",
-    output_type=HPOAMixedResponse,
-    system_prompt=HPOA_SYSTEM_PROMPT,
-    history_processors=[create_context],
-    tools = [
-    # filtering
-    Tool(ToolLimiter(filter_hpoa, max_calls=3).wrap()),
-    Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=3).wrap()),
-    Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=3).wrap()),
-
-    # phenotype lookup
-    Tool(ToolLimiter(search_hp, max_calls=25).wrap()),
-    Tool(ToolLimiter(categorize_hpo, max_calls=25).wrap()),
-    Tool(ToolLimiter(categorize_mondo, max_calls=3).wrap()),
-
-    # disease lookup
-    Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
-    Tool(ToolLimiter(search_mondo, max_calls=3).wrap()),
-
-    # curation tools
-    Tool(ToolLimiter(get_omim_clinical, max_calls=3).wrap()),
-    Tool(ToolLimiter(lookup_pmid_text, max_calls=3).wrap()),
-    Tool(ToolLimiter(pubmed_search_pmids, max_calls=3).wrap()),
-  ],
-)
-
-# retry logic for transient API errors (shorter backoff)
+# retry to avoid transient API errors
 @retry(wait=wait_random_exponential(min=0, max=10),
        stop=stop_after_attempt(3),
        retry=retry_if_exception_type(ModelHTTPError))
 def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int = 75):
+    """Run an agent synchronously with retry and history persistence.
+
+    This helper loads the history from disk, executes the agent,
+    appends the new messages to MSG_HISTORY and saves them back to disk.
+    """
+    # Always load history at the start in case MSG_HISTORY has been reset
+    load_history()
     try:
         result = agent.run_sync(
             input,
             deps=get_config(),
             usage_limits=UsageLimits(request_limit=tool_limit),
-            message_history=MSG_HISTORY or None # Pass None on first call, list afterwards
+            message_history=MSG_HISTORY or None,
         )
-        append_new_messages(result.new_messages())
+        # Append new messages (and save to disk)
+        # On the very first call (no prior history), include the system prompt
+        if not MSG_HISTORY:
+            MSG_HISTORY.extend(result.all_messages())
+            save_history()
+        else:
+            append_new_messages(result.new_messages())
         return result
     finally:
         try:
@@ -240,16 +293,23 @@ def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int
         except Exception:
             pass
 
-
 def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 50):
+    """Run a simplified agent synchronously with history persistence."""
+    # Load persisted history
+    load_history()
     try:
         result = agent.run_sync(
             input,
             deps=get_config(),
-            message_history=MSG_HISTORY or None,  # Pass None on first call, list afterwards
             usage_limits=UsageLimits(request_limit=tool_limit),
+            message_history=MSG_HISTORY or None,
         )
-        append_new_messages(result.new_messages())
+        # Same logic: include system prompt on first call, else just new messages
+        if not MSG_HISTORY:
+            MSG_HISTORY.extend(result.all_messages())
+            save_history()
+        else:
+            append_new_messages(result.new_messages())
         return result
     finally:
         try:
