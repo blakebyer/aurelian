@@ -110,8 +110,7 @@ When listing ontology terms, always include both the ID and label, the label enc
 Do NOT call tools unless necessary. Absolutely no hallucinations, the ontology IDs, labels, and definitions must come from the tools. If a user provides an invalid ID or label, say you cannot find it.
 If unclear, ask one short clarifying question. If the user asks an off-topic question, politely decline and remind them of your scope. Be brief and direct.""")
 
-# Initialize with None - will only contain proper ModelMessage objects
-MSG_HISTORY: Optional[List[ModelMessage]] = None
+MSG_HISTORY: list[ModelMessage] = []
 HISTORY_PATH = Path("history.json")
 MAX_HISTORY = 3
 
@@ -135,35 +134,14 @@ class ToolLimiter:
         wrapper.__signature__ = sig  # keep schema for Pydantic-AI
         return wrapper
     
-def create_context(messages: List[ModelMessage]) -> List[ModelMessage]:
-    """Return only the last MAX_HISTORY messages, keeping proper ModelMessage types."""
-    # Filter to keep only UserPrompt and ModelResponse messages
-    safe_history = []
-    for m in messages:
-        if isinstance(m, (UserPromptPart, ModelResponse)):
-            safe_history.append(m)
-    
-    # Keep only the last MAX_HISTORY exchanges
-    if len(safe_history) > MAX_HISTORY * 2:  # Each exchange is user + assistant
-        safe_history = safe_history[-(MAX_HISTORY * 2):]
-    
-    return safe_history
+def create_context(messages: list[ModelMessage]) -> list[ModelMessage]: 
+    """Keep only the last X messages to manage token usage.""" 
+    return messages[-MAX_HISTORY:] if len(messages) > MAX_HISTORY else messages
 
-def append_new_messages(new_msgs: List[ModelMessage]) -> None:
-    """Append new messages to history, keeping only valid ModelMessage types."""
+def append_new_messages(new_msgs: list[ModelMessage]) -> None:
+    """Append all new messages (user, assistant, tool, etc.)."""
     global MSG_HISTORY
-    
-    if MSG_HISTORY is None:
-        MSG_HISTORY = []
-    
-    # Append only UserPrompt and ModelResponse messages
-    for m in new_msgs:
-        if isinstance(m, (UserPromptPart, ModelResponse)):
-            MSG_HISTORY.append(m)
-    
-    # Trim history if it gets too long
-    if len(MSG_HISTORY) > MAX_HISTORY * 2:
-        MSG_HISTORY = MSG_HISTORY[-(MAX_HISTORY * 2):]
+    MSG_HISTORY.extend(new_msgs)
 
 # Configure OpenAI reasoning model with summary to expose in responses
 oai_model = OpenAIResponsesModel("gpt-5-mini")
@@ -252,7 +230,7 @@ def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int
             input,
             deps=get_config(),
             usage_limits=UsageLimits(request_limit=tool_limit),
-            message_history=MSG_HISTORY  # Pass None on first call, list afterwards
+            message_history=MSG_HISTORY or None # Pass None on first call, list afterwards
         )
         append_new_messages(result.new_messages())
         return result
@@ -268,7 +246,7 @@ def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 5
         result = agent.run_sync(
             input,
             deps=get_config(),
-            message_history=MSG_HISTORY,  # Pass None on first call, list afterwards
+            message_history=MSG_HISTORY or None,  # Pass None on first call, list afterwards
             usage_limits=UsageLimits(request_limit=tool_limit),
         )
         append_new_messages(result.new_messages())
@@ -278,3 +256,6 @@ def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 5
             anyio.run(close_client)
         except Exception:
             pass
+        
+test = call_agent_with_retry("Return the phenotypes for PMID:19473999.")
+print(test)
