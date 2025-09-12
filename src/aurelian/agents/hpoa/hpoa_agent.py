@@ -118,7 +118,7 @@ MSG_HISTORY: list[ModelMessage] = []
 
 # create history directory and history file per session
 HISTORY_FOLDER = Path("history")
-HISTORY_FOLDER.mkdir(exist_ok=True)
+HISTORY_FOLDER.mkdir(exist_ok=True, parents=True)
 SESSION_FILENAME = datetime.datetime.now().strftime("%m-%d-%Y_%H:%M:%S")
 SESSION_HISTORY_FILE = HISTORY_FOLDER / f"history_{SESSION_FILENAME}.json"
 
@@ -145,7 +145,7 @@ def save_history() -> None:
         # If writing fails, ignore silently
         pass
 
-MAX_HISTORY = 10 # ten messages of history
+MAX_HISTORY = 3 # 3 messages of history
 
 def create_context(messages: list[ModelMessage]) -> list[ModelMessage]:
     """Trim the message history for context but preserve the system prompt.
@@ -262,7 +262,7 @@ hpoa_simple_agent = Agent(
 
 # retry to avoid transient API errors
 @retry(wait=wait_random_exponential(min=0, max=30),
-       stop=stop_after_attempt(3),
+       stop=stop_after_attempt(4),
        retry=retry_if_exception_type(ModelHTTPError))
 def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int = 75):
     """Run an agent synchronously with retry and history persistence.
@@ -287,6 +287,9 @@ def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int
         else:
             append_new_messages(result.new_messages())
         return result
+    except Exception as e:
+        # Any other error (connection issues, type errors, etc.)
+        return e
     finally:
         try:
             anyio.run(close_client)
@@ -311,6 +314,9 @@ def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 5
         else:
             append_new_messages(result.new_messages())
         return result
+    except Exception as e:
+        # Any other error (connection issues, type errors, etc.)
+        return e
     finally:
         try:
             anyio.run(close_client)
