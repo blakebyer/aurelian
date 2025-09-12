@@ -129,19 +129,18 @@ class ToolLimiter:
         return wrapper
     
 def create_context(messages: List[ModelMessage]) -> List[ModelMessage]:
-    filtered = [m for m in messages if isinstance(m, (TextPart, UserPromptPart))]
-    if filtered:
-        return filtered[-MAX_HISTORY:]
-    # if filtering wiped everything, return empty (never return a tool)
-    return []
+    """Return only the last MAX_HISTORY text (user/assistant) messages."""
+    safe_history = [m for m in messages if isinstance(m, (TextPart, UserPromptPart))]
+    if len(safe_history) > MAX_HISTORY:
+        safe_history = safe_history[-MAX_HISTORY:]
+    return safe_history
 
 def append_new_messages(new_msgs: List[ModelMessage]) -> None:
     global MSG_HISTORY
+    # Append only text content (assistant text + user text)
     for m in new_msgs:
         if isinstance(m, (TextPart, UserPromptPart)):
             MSG_HISTORY.append(m)
-    if len(MSG_HISTORY) > MAX_HISTORY:
-        MSG_HISTORY = MSG_HISTORY[-MAX_HISTORY:]
 
 # Configure OpenAI reasoning model with summary to expose in responses
 oai_model = OpenAIResponsesModel("gpt-5-mini")
@@ -256,3 +255,7 @@ def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 5
             anyio.run(close_client)
         except Exception:
             pass
+        
+
+test = call_agent_with_retry("Return the phenotypes for PMID:19473999.")
+print(test)
