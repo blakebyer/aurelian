@@ -256,6 +256,3 @@ def call_agent(input: str, agent: Agent = hpoa_simple_agent, tool_limit: int = 5
             anyio.run(close_client)
         except Exception:
             pass
-        
-test = call_agent_with_retry("Return the phenotypes for PMID:19473999.")
-print(test)
