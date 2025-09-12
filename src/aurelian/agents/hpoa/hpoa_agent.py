@@ -117,7 +117,7 @@ MSG_HISTORY: list[ModelMessage] = []
 # create history directory and history file per session
 HISTORY_FOLDER = Path("history")
 HISTORY_FOLDER.mkdir(exist_ok=True, parents=True)
-SESSION_FILENAME = datetime.datetime.now().strftime("%m-%d-%Y_%H_%M_%S")
+SESSION_FILENAME = datetime.datetime.now().strftime("%m-%d-%Y_%H-%M-%S")
 SESSION_HISTORY_FILE = HISTORY_FOLDER / f"history_{SESSION_FILENAME}.json"
 
 def load_history() -> None:
