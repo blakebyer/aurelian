@@ -98,7 +98,7 @@ Workflow
    - No tools for general/off-topic questions
    - Summarize up to 10 (returning both ID and label); leave annotations empty; DO NOT call literature/OMIM tools
    - If a user asks a question, try to answer it. DO NOT say you are "going to" do something and terminate.
-2) Curation (on request): use search_mondo/get_omim_terms/search_hp/pubmed_search_pmids/lookup_pmid sparingly; return 10 or fewer annotations + short explanation.
+2) Curation (on request): use search_mondo/get_omim_terms/search_hp/pubmed_search_pmids/lookup_pmid sparingly; return 10 or fewer annotations + short explanation. Do not search for the PubMed ID multiple times.
 3) Be conservative and transparent; acceptable to propose no changes
 4) Include onset/frequency/sex only when supported by HPOA or explicit evidence in curation""")
 
@@ -228,17 +228,17 @@ hpoa_agent = Agent(
     system_prompt=HPOA_SYSTEM_PROMPT,
     history_processors=[create_context],
     tools=[
-        Tool(ToolLimiter(filter_hpoa, max_calls=3).wrap()),
-        Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=3).wrap()),
-        Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=3).wrap()),
+        Tool(ToolLimiter(filter_hpoa, max_calls=2).wrap()),
+        Tool(ToolLimiter(filter_hpoa_by_pmid, max_calls=2).wrap()),
+        Tool(ToolLimiter(filter_hpoa_by_hp, max_calls=2).wrap()),
         Tool(ToolLimiter(search_hp, max_calls=25).wrap()),
         Tool(ToolLimiter(categorize_hpo, max_calls=25).wrap()),
-        Tool(ToolLimiter(categorize_mondo, max_calls=3).wrap()),
-        Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
+        Tool(ToolLimiter(categorize_mondo, max_calls=2).wrap()),
+        Tool(ToolLimiter(get_omim_terms, max_calls=2).wrap()),
         Tool(ToolLimiter(search_mondo, max_calls=3).wrap()),
-        Tool(ToolLimiter(get_omim_clinical, max_calls=3).wrap()),
-        Tool(ToolLimiter(lookup_pmid_text, max_calls=3).wrap()),
-        Tool(ToolLimiter(pubmed_search_pmids, max_calls=3).wrap()),
+        Tool(ToolLimiter(get_omim_clinical, max_calls=2).wrap()),
+        Tool(ToolLimiter(lookup_pmid_text, max_calls=2).wrap()),
+        Tool(ToolLimiter(pubmed_search_pmids, max_calls=2).wrap()),
     ],
 )
 
