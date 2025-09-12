@@ -9,9 +9,7 @@ from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.messages import (
     ModelMessage, 
     ModelMessagesTypeAdapter,
-    UserPrompt,
     ModelResponse,
-    SystemPrompt,
     TextPart,
     UserPromptPart
 )
@@ -142,7 +140,7 @@ def create_context(messages: List[ModelMessage]) -> List[ModelMessage]:
     # Filter to keep only UserPrompt and ModelResponse messages
     safe_history = []
     for m in messages:
-        if isinstance(m, (UserPrompt, ModelResponse)):
+        if isinstance(m, (UserPromptPart, ModelResponse)):
             safe_history.append(m)
     
     # Keep only the last MAX_HISTORY exchanges
@@ -160,7 +158,7 @@ def append_new_messages(new_msgs: List[ModelMessage]) -> None:
     
     # Append only UserPrompt and ModelResponse messages
     for m in new_msgs:
-        if isinstance(m, (UserPrompt, ModelResponse)):
+        if isinstance(m, (UserPromptPart, ModelResponse)):
             MSG_HISTORY.append(m)
     
     # Trim history if it gets too long
