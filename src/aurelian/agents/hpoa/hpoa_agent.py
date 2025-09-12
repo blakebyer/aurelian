@@ -117,7 +117,7 @@ MSG_HISTORY: list[ModelMessage] = []
 # create history directory and history file per session
 HISTORY_FOLDER = Path("history")
 HISTORY_FOLDER.mkdir(exist_ok=True, parents=True)
-SESSION_FILENAME = datetime.datetime.now().strftime("%m-%d-%Y_%H:%M:%S")
+SESSION_FILENAME = datetime.datetime.now().strftime("%m-%d-%Y_%H_%M_%S")
 SESSION_HISTORY_FILE = HISTORY_FOLDER / f"history_{SESSION_FILENAME}.json"
 
 def load_history() -> None:
@@ -259,10 +259,10 @@ hpoa_simple_agent = Agent(
 )
 
 # retry to avoid transient API errors
-@retry(wait=wait_random_exponential(min=0, max=30),
-       stop=stop_after_attempt(4),
+@retry(wait=wait_random_exponential(min=0, max=10),
+       stop=stop_after_attempt(3),
        retry=retry_if_exception_type(ModelHTTPError))
-def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int = 100):
+def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int = 75):
     """Run an agent synchronously with retry and history persistence.
 
     This helper loads the history from disk, executes the agent,
