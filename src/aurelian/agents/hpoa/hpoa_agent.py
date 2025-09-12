@@ -111,9 +111,7 @@ When listing ontology terms, always include both the ID and label, the label enc
 Do NOT call tools unless necessary. Absolutely no hallucinations, the ontology IDs, labels, and definitions must come from the tools. If a user provides an invalid ID or label, say you cannot find it.
 If unclear, ask one short clarifying question. If the user asks an off-topic question, politely decline and remind them of your scope. Be brief and direct.""")
 
-# ---------------------------------------------------------------------------
-# History persistence
-# ---------------------------------------------------------------------------
+# history persistence
 MSG_HISTORY: list[ModelMessage] = []
 
 # create history directory and history file per session
@@ -264,7 +262,7 @@ hpoa_simple_agent = Agent(
 @retry(wait=wait_random_exponential(min=0, max=30),
        stop=stop_after_attempt(4),
        retry=retry_if_exception_type(ModelHTTPError))
-def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int = 75):
+def call_agent_with_retry(input: str, agent: Agent = hpoa_agent, tool_limit: int = 100):
     """Run an agent synchronously with retry and history persistence.
 
     This helper loads the history from disk, executes the agent,
