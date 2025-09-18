@@ -226,9 +226,9 @@ hpoa_agent = Agent(
     history_processors=[keep_recent_messages],
     tools=[
         # local DB
-        Tool(ToolLimiter(filter_hpoa, max_calls=3).wrap()),
-        Tool(ToolLimiter(search_hp, max_calls=40).wrap()),
-        Tool(ToolLimiter(categorize_hpo, max_calls=40).wrap()),
+        Tool(ToolLimiter(filter_hpoa, max_calls=5).wrap()),
+        Tool(ToolLimiter(search_hp, max_calls=50).wrap()),
+        Tool(ToolLimiter(categorize_hpo, max_calls=50).wrap()),
         Tool(ToolLimiter(categorize_mondo, max_calls=5).wrap()),
         Tool(ToolLimiter(search_mondo, max_calls=5).wrap()),
 
