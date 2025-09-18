@@ -2,7 +2,8 @@
 Tools for interacting with MONDO, HPO, and HPOA files.
 """
 import asyncio
-from typing import TypedDict, List, Literal
+from typing import List, Literal
+from typing_extensions import TypedDict
 import httpx
 import re, sqlite3
 from pydantic_ai import RunContext, ModelRetry
