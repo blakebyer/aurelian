@@ -264,7 +264,7 @@ hpoa_simple_agent = Agent(
 def call_agent_with_retry(
     input: str,
     agent: Agent = hpoa_agent,
-    tool_limit: int = 80,
+    tool_limit: int = 100,
     use_history: bool = True,
 ):
     if use_history:
