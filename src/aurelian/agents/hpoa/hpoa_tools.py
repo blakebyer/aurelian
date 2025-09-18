@@ -2,12 +2,11 @@
 Tools for interacting with MONDO, HPO, and HPOA files.
 """
 import asyncio
-from typing import Dict, List, Any, Optional
-import requests
+from typing import Dict, List, Any, Optional, Literal
 import httpx
-import re, os, sqlite3
+import re, sqlite3
 from pydantic_ai import RunContext, ModelRetry
-from .hpoa_config import HPOADependencies, HPOA, get_config, get_client
+from .hpoa_config import HPOADependencies, HPOA, get_config
 from aurelian.agents.literature.literature_tools import (
     lookup_pmid as literature_lookup_pmid,
     literature_search_pmids as literature_search_pmids,
@@ -128,8 +127,8 @@ async def get_omim_terms(ctx: RunContext[HPOADependencies], label: str):
         "Accept": "application/json",
         "User-Agent": "aurelian-hpoa/1.0",
     }
-    client = await get_client()
-    r = await client.get(url, params=params, headers=headers)
+    async with httpx.AsyncClient(timeout = 30.0, follow_redirects=True) as client:
+        r = await client.get(url, params=params, headers=headers)
     try:
         r.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -158,8 +157,8 @@ async def get_omim_clinical(ctx: RunContext[HPOADependencies], label: str):
         "Accept": "application/json",
         "User-Agent": "aurelian-hpoa/1.0",
     }
-    client = await get_client()
-    r = await client.get(url, params=params, headers=headers)
+    async with httpx.AsyncClient(timeout = 30.0, follow_redirects=True) as client:
+        r = await client.get(url, params=params, headers=headers)
     try:
         r.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -168,8 +167,60 @@ async def get_omim_clinical(ctx: RunContext[HPOADependencies], label: str):
         return r.json()
     except ValueError:
             raise ModelRetry("OMIM clinical search returned non-JSON response")
+    
+async def filter_hpoa(
+    ctx: RunContext[HPOADependencies],
+    field: Literal[
+        "database_id",
+        "disease_name",
+        "qualifier",
+        "hpo_id",
+        "reference",
+        "evidence",
+        "onset",
+        "frequency",
+        "sex",
+        "modifier",
+        "aspect",
+        "biocuration",
+    ],
+    query: str,
+    mode: Literal["exact", "like"] = "exact",
+) -> List[HPOA]:
+    """
+    General filter for phenotype.hpoa by any field.
 
-async def filter_hpoa(ctx: RunContext[HPOADependencies], label: str) -> List[HPOA]:
+    Args:
+        field: Column to filter on (must be one of the allowed Literals).
+        query: Search string (e.g., "OMIM:300615", "Fabry", "HP:0001250").
+        mode:  "exact" (case-insensitive equality) or "like" (substring match).
+    """
+    config = ctx.deps or get_config()
+    await config.ensure_hpoa_db()
+
+    con = sqlite3.connect(config.hpoa_db_path)
+    con.row_factory = sqlite3.Row
+    try:
+        cur = con.cursor()
+        if mode == "exact":
+            cur.execute(f"SELECT * FROM hpoa WHERE UPPER({field}) = ?", (query.upper(),))
+        elif mode == "like":
+            cur.execute(f"SELECT * FROM hpoa WHERE {field} LIKE ? COLLATE NOCASE", (f"%{query}%",))
+        else:
+            raise ValueError("mode must be 'exact' or 'like'")
+        rows = [dict(r) for r in cur.fetchall()]
+    finally:
+        con.close()
+
+    results: List[HPOA] = []
+    for row in rows:
+        try:
+            results.append(HPOA(**row))
+        except Exception as e:
+            print(f"Skipping row due to error: {e}")
+    return results
+
+async def filter_hpoa_by_disease(ctx: RunContext[HPOADependencies], label: str) -> List[HPOA]:
     """
     Return all phenotype.hpoa rows for a disease.
 
@@ -331,7 +382,7 @@ async def pubmed_search_pmids(ctx: RunContext[HPOADependencies], query: str, ret
 
     print(f"SEARCH PUBMED FOR PMIDs RELATED TO: {query}")
 
-    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+    async with httpx.AsyncClient(timeout = 30.0, follow_redirects=True) as client:
         r = await client.get(url, params=params, headers=headers)
         try:
             r.raise_for_status()

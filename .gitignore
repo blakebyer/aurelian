@@ -141,3 +141,4 @@ dmypy.json
 hpoa.db
 phenotype.hpoa
 history.json
+/history

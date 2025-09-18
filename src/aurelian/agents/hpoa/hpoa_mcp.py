@@ -59,7 +59,7 @@ async def get_omim_clinical(label: str) -> dict:
 @mcp.tool()
 async def filter_hpoa(label: str):
     """
-    Filter HPOA to a disease or diseases of interest based on OMIM, ORPHA, or disease names.
+    Filter HPOA to a disease or diseases of interest based on any field in the HPOA table.
     """
     return await ht.filter_hpoa(ctx(), label)
 
@@ -108,6 +108,23 @@ async def lookup_pmid(pmid: str) -> str:
 async def pubmed_search_pmids(query: str) -> List[str]:
     """Search PubMed (NCBI ESearch) for PMIDs matching a query. Returns ["PMID:nnnnnnn", ...]."""
     return await ht.pubmed_search_pmids(ctx(), query)
+
+@mcp.tool()
+async def lookup_literature(query: str) -> List[str]:
+    """Search literature for PMIDs matching a free-text query."""
+    return await ht.lookup_literature(query)
+
+
+@mcp.tool()
+async def children_of(term: str) -> List[str]:
+    """Get direct children of a given HP or MONDO term."""
+    return await ht.children_of(ctx(), term)
+
+
+@mcp.tool()
+async def parents_of(term: str) -> List[str]:
+    """Get direct parents of a given HP or MONDO term."""
+    return await ht.parents_of(ctx(), term)
 
 if __name__ == "__main__":
     # Initialize and run the server

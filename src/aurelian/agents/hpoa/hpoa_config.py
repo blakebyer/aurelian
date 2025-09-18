@@ -44,8 +44,8 @@ class HPOA(BaseModel):
         return data
 
 class HPOAResult(BaseModel):
-    status: Literal["new", "updated", "removed"] = Field(
-        ..., description="Whether this annotation was new, updated, or suggested for removal from the phenotype.hpoa file."
+    status: Literal["existing", "new", "updated", "removed"] = Field(
+        ..., description="Whether this annotation was existing, new, updated, or suggested for removal from the phenotype.hpoa file."
     )
     rationale: Optional[str] = None
     annotation: HPOA
@@ -150,17 +150,22 @@ class HPOADependencies(HasWorkdir):
                 return rows
 
         # 3) Download latest and save to CWD
-        client = await get_client()
-        r = await client.get("https://api.github.com/repos/obophenotype/human-phenotype-ontology/releases/latest")
-        r.raise_for_status()
-        url = next(
-            a["browser_download_url"]
-            for a in r.json().get("assets", [])
-            if "phenotype.hpoa" in a.get("browser_download_url", "")
-        )
-        f = await client.get(url)
-        f.raise_for_status()
-        text = f.text
+        async with httpx.AsyncClient() as client:
+            # Get the latest release metadata
+            r = await client.get("https://api.github.com/repos/obophenotype/human-phenotype-ontology/releases/latest")
+            r.raise_for_status()
+
+            # Find the phenotype.hpoa asset
+            url = next(
+                a["browser_download_url"]
+                for a in r.json().get("assets", [])
+                if "phenotype.hpoa" in a.get("browser_download_url", "")
+            )
+
+            # Download the asset
+            f = await client.get(url)
+            f.raise_for_status()
+            text = await f.atext()
 
         # Save to CWD as phenotype.hpoa
         try:
@@ -344,31 +349,3 @@ def _read_hpoa_from_path(path: str) -> List[Dict[str, str]]:
         lines = [ln for ln in fh.read().splitlines() if ln.strip() and not ln.startswith("#")]
     reader = csv.DictReader(lines, delimiter="\t")
     return list(reader)
-
-
-# Shared Async HTTP client for session reuse
-_async_client: Optional[httpx.AsyncClient] = None
-
-
-async def get_client() -> httpx.AsyncClient:
-    """Get or create a shared AsyncClient for HTTP requests."""
-    global _async_client
-    if _async_client is None:
-        # Enable HTTP/2 when available; otherwise, gracefully fall back to HTTP/1.1
-        try:
-            import h2  # noqa: F401
-            http2_flag = True
-        except Exception:
-            http2_flag = False
-        _async_client = httpx.AsyncClient(timeout=60.0, follow_redirects=True, http2=http2_flag)
-    return _async_client
-
-
-async def close_client() -> None:
-    """Close the shared AsyncClient and reset it."""
-    global _async_client
-    if _async_client is not None:
-        try:
-            await _async_client.aclose()
-        finally:
-            _async_client = None

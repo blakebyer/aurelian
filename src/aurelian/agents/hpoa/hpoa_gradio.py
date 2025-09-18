@@ -24,19 +24,24 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
     if deps is None:
         deps = HPOADependencies()
 
-    def _strip_json_blocks(text: str) -> str:
-        """Strip fenced JSON blocks (```json ...``` or ```{...}```) from text."""
-        if not text:
+    def format_agent_result(result):
+        data = result.output
+        if hasattr(data, "model_dump"):
+            dd = data.model_dump()
+            text = dd.get("text") or ""
+
+            ann = dd.get("annotations") or []
+            if ann:
+                block = json.dumps(
+                    {"explanation": text, "annotations": ann},
+                    indent=2
+                )
+                return f"{text}\n\n```json\n{block}\n```"
             return text
-        pattern = re.compile(r"```(?:json)?\s*([\s\S]*?)```", re.IGNORECASE)
 
-        def repl(m: re.Match) -> str:
-            inner = (m.group(1) or "").strip()
-            if inner.startswith("{") or inner.startswith("["):
-                return ""
-            return m.group(0)
-
-        return re.sub(pattern, repl, text).strip()
+        if isinstance(data, (dict, list)):
+            return f"```json\n{json.dumps(data, indent=2)}\n```"
+        return str(data)
 
     def get_info(query: str, history: List[str]) -> str:
         # Minimal handler; Gradio renders Markdown/newlines in returned string
@@ -54,23 +59,8 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
 
             # Stateless agent call per request
             result = call_agent_with_retry(query)
-            data = result.output
             # Prefer conversational text; append a copyable JSON block when annotations are present
-            if hasattr(data, "model_dump"):
-                dd = data.model_dump()
-                text = _strip_json_blocks(dd.get("text") or "")
-                ann = dd.get("annotations") or []
-                if ann:
-                    block = json.dumps({
-                        "explanation": (text or ""),
-                        "annotations": ann,
-                    }, indent=2)
-                    return f"{text}\n\n```json\n{block}\n```"
-                return text if text else json.dumps(dd, indent=2)
-            if isinstance(data, (dict, list)):
-                # Fallback: pretty print dicts/lists, which Gradio will render with newlines
-                return json.dumps(data, indent=2)
-            return str(data)
+            return format_agent_result(result)
         except Exception as e:
             msg = str(e)
             if "rate limit" in msg.lower() or "429" in msg:
@@ -93,7 +83,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
         description="<div style='text-align: center;'>"
                 "An AI assistant for querying and curating Human Phenotype Ontology Annotations (HPOA)"
                 "</div>",
-        chatbot=gr.Chatbot(show_copy_button=True, render_markdown=True),
+        chatbot=gr.Chatbot(type="messages", show_copy_button=True, render_markdown=True),
         examples=[
             ["List the phenotypes and source studies for OMIM:300615"],
             ["What neurological phenotypes are associated with Coffin-Lowry syndrome?"],
