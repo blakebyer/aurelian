@@ -2,7 +2,7 @@
 Tools for interacting with MONDO, HPO, and HPOA files.
 """
 import asyncio
-from typing import Dict, List, Any, Optional, Literal
+from typing import TypedDict, List, Literal
 import httpx
 import re, sqlite3
 from pydantic_ai import RunContext, ModelRetry
@@ -168,8 +168,9 @@ async def get_omim_clinical(ctx: RunContext[HPOADependencies], label: str):
     except ValueError:
             raise ModelRetry("OMIM clinical search returned non-JSON response")
     
-async def filter_hpoa(
-    ctx: RunContext[HPOADependencies],
+CURIE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]+:\d+$")
+
+class FilterSpec(TypedDict, total=False):
     field: Literal[
         "database_id",
         "disease_name",
@@ -183,17 +184,17 @@ async def filter_hpoa(
         "modifier",
         "aspect",
         "biocuration",
-    ],
-    query: str,
-    mode: Literal["exact", "like"] = "exact",
+    ]
+    query: str
+    mode: Literal["exact", "like"]
+
+async def filter_hpoa(
+    ctx: RunContext[HPOADependencies],
+    filters: List[FilterSpec],
 ) -> List[HPOA]:
     """
-    General filter for phenotype.hpoa by any field.
-
-    Args:
-        field: Column to filter on (must be one of the allowed Literals).
-        query: Search string (e.g., "OMIM:300615", "Fabry", "HP:0001250").
-        mode:  "exact" (case-insensitive equality) or "like" (substring match).
+    Filter phenotype.hpoa by multiple fields with per-field modes.
+    Always constrained to rows in the `hpoa` table.
     """
     config = ctx.deps or get_config()
     await config.ensure_hpoa_db()
@@ -202,22 +203,48 @@ async def filter_hpoa(
     con.row_factory = sqlite3.Row
     try:
         cur = con.cursor()
-        if mode == "exact":
-            cur.execute(f"SELECT * FROM hpoa WHERE UPPER({field}) = ?", (query.upper(),))
-        elif mode == "like":
-            cur.execute(f"SELECT * FROM hpoa WHERE {field} LIKE ? COLLATE NOCASE", (f"%{query}%",))
-        else:
-            raise ValueError("mode must be 'exact' or 'like'")
+
+        clauses = []
+        params = []
+
+        # Build only from allowed fields
+        for spec in filters:
+            field = spec["field"]
+            query = spec["query"].strip()
+            mode = spec.get("mode")
+
+            # Auto mode if not specified
+            if mode is None:
+                if CURIE_PATTERN.match(query):
+                    mode = "exact"
+                else:
+                    mode = "like"
+
+            if mode == "exact":
+                clauses.append(f"UPPER({field}) = ?")
+                params.append(query.upper())
+            elif mode == "like":
+                clauses.append(f"{field} LIKE ? COLLATE NOCASE")
+                params.append(f"%{query}%")
+            else:
+                raise ValueError(f"Invalid mode {mode} for field {field}")
+
+        if not clauses:
+            return []  # no filters → nothing
+
+        sql = f"SELECT * FROM hpoa WHERE {' AND '.join(clauses)}"
+        cur.execute(sql, tuple(params))
         rows = [dict(r) for r in cur.fetchall()]
     finally:
         con.close()
 
+    # Strictly cast rows to HPOA model, invalid rows skipped
     results: List[HPOA] = []
     for row in rows:
         try:
             results.append(HPOA(**row))
         except Exception as e:
-            print(f"Skipping row due to error: {e}")
+            print(f"Skipping invalid row: {e}")
     return results
 
 async def filter_hpoa_by_disease(ctx: RunContext[HPOADependencies], label: str) -> List[HPOA]:

@@ -85,10 +85,10 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
                 "</div>",
         chatbot=gr.Chatbot(type="messages", show_copy_button=True, render_markdown=True),
         examples=[
-            ["List the phenotypes and source studies for OMIM:300615"],
-            ["What neurological phenotypes are associated with Coffin-Lowry syndrome?"],
+            ["Which phenotypes for Charcot-Marie tooth disease affect females?"],
+            ["Suggest removal of phenotype annotations with poor evidence for ORPHA:580"],
             ["Propose new annotations for Fabry disease based on PMID:21092187"],
-            ["Which organ system does HP:0004322 (Short stature) belong to?"]
+            ["List the top 10 phenotypes by frequency for Digeorge syndrome"]
         ]
     )
 

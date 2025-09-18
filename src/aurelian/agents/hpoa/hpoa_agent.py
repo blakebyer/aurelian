@@ -78,9 +78,10 @@ Absolutely No Hallucinations
 - No external inference: do not infer clinical specifics beyond HPOA. General disease context is fine; phenotype specifics must be anchored to HPOA rows.
 
 Tool Reference
-- filter_hpoa: tool for any filtering of the HPOA database.  
-  - You must always use a valid HPOA row field (e.g., database_id, disease_name, hpo_id, reference, evidence, etc.).  
-  - Use `mode="exact"` for CURIEs (OMIM, MONDO, ORPHA, DECIPHER, HP IDs), and `mode="like"` for substring text searches, such as by disease labels.
+- filter_hpoa: tool to search rows from the hpoa table by one or more fields (e.g., disease_name, sex, hpo_id, frequency)
+  - Provide a list of filters, each with a field and a query
+  - You may optionally include a mode: "exact" (case-insensitive equality) or "like" (substring match). 
+  - If mode is not given, assume "exact" for CURIEs (e.g. OMIM:123456, HP:0001250, MONDO:0005438) and "like" for human-readable labels (e.g. Fabry, female). Multiple filters are combined with AND.
 - categorize_hpo: categorize HPO terms under top-level organ systems (HP:0000118)
 - categorize_mondo: categorize MONDO terms into high-level disease groups (only when asked)
 - search_hp: resolve HPO IDs/labels; verify labels for HP:IDs
