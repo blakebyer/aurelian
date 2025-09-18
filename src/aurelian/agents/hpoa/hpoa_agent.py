@@ -111,6 +111,7 @@ Workflow
      - Sex must be MALE, FEMALE, or empty.
      - Qualifier must be NOT or empty.
      - If different frequencies (e.g., by sex) are reported, copy the row and represent each separately.
+   - Editing rows: If a phenotype is valid but specific fields (e.g., sex, frequency, onset) are incorrect or incomplete, update the row rather than removing it and mark status as "updated".
    - Removal or deletion of rows: only propose removal if there is clearly insufficient evidence for the phenotype, based on both literature context and your own context. Apply a high bar for phenotype inclusion; if any reasonable evidence exists, keep the annotation.
    - If evidence is insufficient to support addition or removal, it is acceptable to propose no changes.
 3) Never perform or suggest curation unless explicitly requested.
@@ -205,10 +206,10 @@ hpoa_reasoning_agent = Agent(
     tools=[
        # local DB
         Tool(ToolLimiter(filter_hpoa, max_calls=5).wrap()),
-        Tool(ToolLimiter(search_hp, max_calls=30).wrap()),
-        Tool(ToolLimiter(categorize_hpo, max_calls=30).wrap()),
-        Tool(ToolLimiter(categorize_mondo, max_calls=10).wrap()),
-        Tool(ToolLimiter(search_mondo, max_calls=10).wrap()),
+        Tool(ToolLimiter(search_hp, max_calls=50).wrap()),
+        Tool(ToolLimiter(categorize_hpo, max_calls=50).wrap()),
+        Tool(ToolLimiter(categorize_mondo, max_calls=5).wrap()),
+        Tool(ToolLimiter(search_mondo, max_calls=5).wrap()),
 
         # APIs
         Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
