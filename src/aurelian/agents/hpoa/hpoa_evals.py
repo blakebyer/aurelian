@@ -9,7 +9,6 @@ from pydantic_ai import RunContext
 from aurelian.agents.hpoa.hpoa_config import HPOADependencies
 import aurelian.agents.hpoa.hpoa_tools as tools
 
-
 # --------------------------------------------------------------------
 # Fixture builder for phenotype.hpoa
 # --------------------------------------------------------------------

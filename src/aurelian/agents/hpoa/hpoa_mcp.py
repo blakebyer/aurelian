@@ -2,7 +2,7 @@
 MCP tools for interacting with HPOA files.
 """
 import os
-from typing import Dict, List, Optional
+from typing import List
 
 from mcp.server.fastmcp import FastMCP
 

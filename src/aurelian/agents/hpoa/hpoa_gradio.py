@@ -2,9 +2,7 @@
 from typing import List, Optional
 import os
 import json
-
 import gradio as gr
-
 from .hpoa_agent import call_agent_with_retry
 from .hpoa_config import HPOADependencies
 
@@ -97,7 +95,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
             ["Which phenotypes for Charcot-Marie tooth disease affect females?"],
             ["Suggest removal of phenotype annotations with poor evidence for ORPHA:580"],
             ["Propose new annotations for Fabry disease based on PMID:21092187"],
-            ["List the top 10 phenotypes by frequency for Digeorge syndrome"]
+            ["List the top 10 phenotypes by frequency for Digeorge syndrome"],
         ]
     )
 
