@@ -2,7 +2,6 @@
 from typing import List, Optional
 import os
 import json
-import re
 
 import gradio as gr
 
@@ -26,23 +25,33 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
 
     def format_agent_result(result):
         data = result.output
+
         if hasattr(data, "model_dump"):
             dd = data.model_dump()
-            text = dd.get("text") or ""
 
-            ann = dd.get("annotations") or []
+            explanation = dd.get("explanation") or ""
+            explanation_stripped = explanation.strip()
+            if (
+                explanation
+                and "```" not in explanation
+                and (explanation_stripped.startswith("{") or explanation_stripped.startswith("["))
+            ):
+                explanation_out = f"```json\n{explanation}\n```"
+            else:
+                explanation_out = explanation
+
+            ann = dd.get("annotations")
             if ann:
-                block = json.dumps(
-                    {"explanation": text, "annotations": ann},
-                    indent=2
-                )
-                return f"{text}\n\n```json\n{block}\n```"
-            return text
+                ann_block = f"```json\n{json.dumps({'annotations': ann}, indent=2, ensure_ascii=False)}\n```"
+                return f"{explanation_out}\n\n{ann_block}" if explanation_out else ann_block
+
+            return explanation_out
 
         if isinstance(data, (dict, list)):
-            return f"```json\n{json.dumps(data, indent=2)}\n```"
-        return str(data)
+            return f"```json\n{json.dumps(data, indent=2, ensure_ascii=False)}\n```"
 
+        return str(data)
+    
     def get_info(query: str, history: List[str]) -> str:
         # Minimal handler; Gradio renders Markdown/newlines in returned string
         try:
