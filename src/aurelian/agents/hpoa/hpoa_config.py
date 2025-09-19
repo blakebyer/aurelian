@@ -44,8 +44,8 @@ class HPOA(BaseModel):
         return data
 
 class HPOAResult(BaseModel):
-    status: Literal["keep", "add", "edit", "delete"] = Field(
-        ..., description="Suggestion from the agent to keep, add, edit, or delete a row from the phenotype.hpoa file."
+    status: Literal["existing", "add", "edit", "remove"] = Field(
+        ..., description="If an HPOA row is existing, or the agent suggests to add, edit, or remove an HPOA row."
     )
     rationale: Optional[str] = None
     annotation: HPOA
