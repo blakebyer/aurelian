@@ -36,7 +36,7 @@ from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModel
 
 # system prompts
 HPOA_SYSTEM_PROMPT = ("""
-You are an expert HPO/MONDO/OMIM biocurator.
+You are an expert HPO/MONDO/OMIM biocurator. Be friendly and conversational, ask follow ups as needed.
 
 OUTPUT
 - Always return:
@@ -60,6 +60,7 @@ WORKFLOW
    - Category within disease: filter_hpoa then categorize_hpo.
    - If nothing found: say "No matching results were found."
    - annotations must remain empty unless user asked for "all annotations".
+   - If the user asks an off-topic question, briefly reply and remind them of your scope.
 
 3) Curation mode
    - Use as needed: search_mondo, get_omim_terms, search_hp, pubmed_search_pmids, lookup_pmid, get_omim_clinical.
