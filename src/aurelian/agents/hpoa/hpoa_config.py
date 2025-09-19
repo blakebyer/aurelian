@@ -44,25 +44,21 @@ class HPOA(BaseModel):
         return data
 
 class HPOAResult(BaseModel):
-    status: Literal["existing", "new", "changed", "removed"] = Field(
-        ..., description="Whether this annotation was existing, new, changed, or suggested for removal from the phenotype.hpoa file."
+    status: Literal["keep", "add", "edit", "delete"] = Field(
+        ..., description="Suggestion from the agent to keep, add, edit, or delete a row from the phenotype.hpoa file."
     )
     rationale: Optional[str] = None
     annotation: HPOA
 
 class HPOAResponse(BaseModel):
-    explanation: str = Field(..., description="A brief natural language explanation of what was found and done.")
-    annotations: List[HPOAResult]
-
-class HPOAMixedResponse(BaseModel):
     """
     Flexible output for conversational + structured use.
 
-    - text: free-form response for conversational answers and reasoning
+    - explanation: free-form response for conversational answers or reasoning narrative
     - annotations: optional structured block for curation actions; leave empty when not applicable
     """
-    text: str = Field(..., description="Free text response and/or reasoning narrative.")
-    annotations: List[HPOAResult] = Field(default_factory=list, description="Structured HPOA changes; empty when not proposing changes.")
+    explanation: str = Field(..., description="A brief natural language explanation of what was found and done.")
+    annotations: List[HPOAResult]
 
 @dataclass
 class HPOADependencies(HasWorkdir):

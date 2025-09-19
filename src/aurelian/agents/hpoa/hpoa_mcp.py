@@ -64,6 +64,13 @@ async def filter_hpoa(label: str):
     return await ht.filter_hpoa(ctx(), label)
 
 @mcp.tool()
+async def filter_hpoa_by_disease(label: str):
+    """
+    Filter HPOA to a disease or diseases of interest based on database_id or disease_name in the HPOA table.
+    """
+    return await ht.filter_hpoa_by_disease(ctx(), label)
+
+@mcp.tool()
 async def filter_hpoa_by_pmid(pmid: str):
     """Return HPOA rows that cite a given PMID (PMID:nnnnnnn or digits)."""
     return await ht.filter_hpoa_by_pmid(ctx(), pmid)
@@ -100,7 +107,7 @@ async def categorize_mondo(term: str) -> List[str]:
 @mcp.tool()
 async def lookup_pmid(pmid: str) -> str:
     """
-    Lookup a PubMed ID to get the article abstract.
+    Lookup a PubMed ID to get the article abstract or full text.
     """
     return await ht.lookup_pmid(pmid)
 
