@@ -5,9 +5,15 @@ This file contains tests for CLI command execution, including direct query mode.
 These tests mock out dependencies to avoid making actual API calls.
 """
 
+from pathlib import Path
+import sys
+import types
+
 import pytest
 from unittest.mock import patch, MagicMock
 from click.testing import CliRunner
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from aurelian.cli import main
 
@@ -79,3 +85,59 @@ def test_all_agent_commands_help():
         assert result.exit_code == 0, f"Help for {command} failed with {result.output}"
         assert "Run with a query for direct mode" in result.output or "Run with a URL for direct mode" in result.output, \
             f"Missing mode info in {command} help"
+
+def test_hpoa_direct_query_uses_retry(monkeypatch):
+    """Ensure the HPOA CLI path routes through call_agent_with_retry."""
+    runner = CliRunner()
+    monkeypatch.setenv('OPENAI_API_KEY', 'test-key')
+
+    fake_pdfminer = types.ModuleType('pdfminer')
+    fake_pdfminer_high_level = types.ModuleType('pdfminer.high_level')
+    fake_pdfminer_high_level.extract_text = lambda *a, **k: ''
+    fake_pdfminer.high_level = fake_pdfminer_high_level
+    monkeypatch.setitem(sys.modules, 'pdfminer', fake_pdfminer)
+    monkeypatch.setitem(sys.modules, 'pdfminer.high_level', fake_pdfminer_high_level)
+
+    fake_gradio = types.ModuleType('gradio')
+    def _fake_chat_interface(*args, **kwargs):
+        return types.SimpleNamespace(launch=lambda **kw: None, fn=kwargs.get('fn'))
+    class _FakeChatbot:
+        def __init__(self, *args, **kwargs):
+            pass
+    fake_gradio.ChatInterface = _fake_chat_interface
+    fake_gradio.Chatbot = _FakeChatbot
+    monkeypatch.setitem(sys.modules, 'gradio', fake_gradio)
+
+    fake_logfire = types.ModuleType('logfire')
+    fake_logfire.configure = lambda *a, **k: None
+    monkeypatch.setitem(sys.modules, 'logfire', fake_logfire)
+
+    fake_logfire_api = types.ModuleType('logfire_api')
+    fake_logfire_api.LogfireSpan = object
+    monkeypatch.setitem(sys.modules, 'logfire_api', fake_logfire_api)
+
+    calls = {}
+
+    class _DummyResult:
+        data = 'ok'
+        def all_messages_json(self):
+            return '[]'
+        def new_messages(self):
+            return []
+
+    def _fake_retry(input, agent=None, deps=None, **kwargs):
+        calls['input'] = input
+        payload = dict(kwargs)
+        payload['agent'] = agent
+        payload['deps'] = deps
+        calls['kwargs'] = payload
+        return _DummyResult()
+
+    monkeypatch.setattr('aurelian.agents.hpoa.hpoa_agent.call_agent_with_retry', _fake_retry, raising=False)
+
+    result = runner.invoke(main, ['hpoa', 'test case'])
+    assert calls.get('input') == 'test case'
+    assert result.exit_code == 0
+    kwargs = calls['kwargs']
+    assert kwargs.get('deps') is not None
+

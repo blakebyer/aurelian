@@ -15,12 +15,15 @@ from oaklib.datamodels.search import SearchConfiguration
 import inspect as _inspect
 
 async def search_hp(ctx: RunContext[HPOADependencies], term: str) -> List[dict]:
-    """Search the HPO for phenotypic abnormalities by ID or label.
+    """Look up HPO phenotypic abnormality terms by CURIE or partial label.
 
-    - If `term` starts with "HP:", normalize and return that term (id/label/definition).
-    - Otherwise, run a basic partial label search and return HP terms.
+    Args:
+        ctx: Execution context providing ontology adapters.
+        term: Search string; accepts HP CURIEs or free-text labels.
+
+    Returns:
+        List[dict]: Resolved HP term dictionaries with `id`, `label`, and `definition` keys.
     """
-
     config = ctx.deps or get_config()
     hp = config.get_hp_adapter()
 
@@ -64,12 +67,15 @@ async def search_hp(ctx: RunContext[HPOADependencies], term: str) -> List[dict]:
     return results
 
 async def search_mondo(ctx: RunContext[HPOADependencies], term: str) -> List[dict]:
-    """Search the MONDO ontology by ID or label.
+    """Look up MONDO disease terms by CURIE or partial label.
 
-    - If `term` starts with "MONDO:", normalize and return that term (id/label/definition).
-    - Otherwise, run a basic partial label search and return MONDO terms.
+    Args:
+        ctx: Execution context providing ontology adapters.
+        term: Search string; accepts MONDO CURIEs or free-text labels.
+
+    Returns:
+        List[dict]: Resolved MONDO term dictionaries with `id`, `label`, and `definition` keys.
     """
-
     config = ctx.deps or get_config()
     mondo = config.get_mondo_adapter()
 
@@ -113,7 +119,18 @@ async def search_mondo(ctx: RunContext[HPOADependencies], term: str) -> List[dic
     return results
 
 async def get_omim_terms(ctx: RunContext[HPOADependencies], label: str):
-    """Search the OMIM DB for disease identifiers (async httpx)."""
+    """Retrieve OMIM entry metadata for diseases that match the label.
+
+    Args:
+        ctx: Execution context providing configuration and API keys.
+        label: Free-text search term sent to the OMIM entry search endpoint.
+
+    Returns:
+        dict: Parsed JSON payload describing candidate OMIM entries.
+
+    Raises:
+        ModelRetry: If the HTTP request fails or the payload cannot be decoded.
+    """
     config = ctx.deps or get_config()
     OMIM_API_KEY = config.omim_api_key
 
@@ -139,9 +156,17 @@ async def get_omim_terms(ctx: RunContext[HPOADependencies], label: str):
             raise ModelRetry("OMIM search returned non-JSON response")
 
 async def get_omim_clinical(ctx: RunContext[HPOADependencies], label: str):
-    """Search the OMIM DB for clinical synopses (async httpx).
+    """Fetch OMIM clinical synopsis data for diseases that match the label.
 
-    This can include other clinical DB terms e.g. SNOMED, HP, ICD10CM in the synopsis.
+    Args:
+        ctx: Execution context providing configuration and API keys.
+        label: Free-text disease term sent to the OMIM entry search endpoint.
+
+    Returns:
+        dict: Parsed JSON payload containing clinical synopsis sections.
+
+    Raises:
+        ModelRetry: If the HTTP request fails or the response cannot be decoded.
     """
     config = ctx.deps or get_config()
     OMIM_API_KEY = config.omim_api_key
@@ -152,6 +177,7 @@ async def get_omim_clinical(ctx: RunContext[HPOADependencies], label: str):
         "format": "json",
         "include": "clinicalSynopsis",
         "apiKey": OMIM_API_KEY or "",
+        "limit": "10", # limit results
     }
     headers = {
         "Accept": "application/json",
@@ -192,9 +218,14 @@ async def filter_hpoa(
     ctx: RunContext[HPOADependencies],
     filters: List[FilterSpec],
 ) -> List[HPOA]:
-    """
-    Filter phenotype.hpoa by multiple fields with per-field modes.
-    Always constrained to rows in the `hpoa` table.
+    """Filter the local phenotype.hpoa database using structured predicates.
+
+    Args:
+        ctx: Execution context providing the local SQLite database.
+        filters: Sequence of filter specifications describing field, query, and match mode.
+
+    Returns:
+        List[HPOA]: Rows that satisfy every provided filter.
     """
     config = ctx.deps or get_config()
     await config.ensure_hpoa_db()
@@ -295,10 +326,14 @@ async def filter_hpoa_by_disease(ctx: RunContext[HPOADependencies], label: str) 
     return results
 
 async def filter_hpoa_by_pmid(ctx: RunContext[HPOADependencies], pmid: str) -> List[HPOA]:
-    """
-    Return all phenotype.hpoa rows that cite a given PMID in the `reference` field.
+    """Return phenotype.hpoa rows that cite the provided PMID.
 
-    Accepts either "PMID:123456" or bare digits "123456".
+    Args:
+        ctx: Execution context with access to the local HPOA database.
+        pmid: PubMed identifier supplied as "PMID:n" or bare digits.
+
+    Returns:
+        List[HPOA]: Rows whose reference field contains the PMID.
     """
     config = ctx.deps or get_config()
     await config.ensure_hpoa_db()
@@ -322,34 +357,36 @@ async def filter_hpoa_by_pmid(ctx: RunContext[HPOADependencies], pmid: str) -> L
     return results
 
 async def lookup_pmid(pmid: str) -> str:
-    """
-    Lookup the text of a PubMed article by its PMID.
-    A PMID should be of the form "PMID:nnnnnnn" (no underscores).
+    """Return the abstract or full text for a PubMed article.
+
     Args:
-        pmid: The PubMed ID to look up
-        
+        pmid: PubMed identifier supplied as "PMID:n" or bare digits.
+
     Returns:
-        str: Full text if available, otherwise abstract
+        str: Text blob provided by the backing literature tool.
     """
     return await literature_lookup_pmid(pmid)
 
 async def lookup_literature(query: str) -> List[str]:
-    """
-    Search the Web for PMIDs matching a text query.
+    """Search the literature helper for PMIDs that match the query.
+
     Args:
-        query: The search query
-        
+        query: Free-text search phrase describing the desired topic.
+
     Returns:
-        List of matching PMIDs
+        List[str]: Candidate PMIDs returned by the upstream helper.
     """
     return await literature_search_pmids(query)
 
 async def filter_hpoa_by_hp(ctx: RunContext[HPOADependencies], hp: str) -> List[HPOA]:
-    """
-    Return all phenotype.hpoa rows that have a given HPO term in `hpo_id`.
+    """Return phenotype.hpoa rows tied to the requested HPO identifier.
 
-    Accepts either an HP:ID (e.g., "HP:0001250") or a phenotype label.
-    If a label is provided, resolves to the top HP:ID via search_hp.
+    Args:
+        ctx: Execution context with access to ontology adapters and database.
+        hp: HPO CURIE or label; labels are resolved to an ID before filtering.
+
+    Returns:
+        List[HPOA]: Rows whose `hpo_id` matches the resolved identifier.
     """
     config = ctx.deps or get_config()
     await config.ensure_hpoa_db()
@@ -428,13 +465,16 @@ async def pubmed_search_pmids(ctx: RunContext[HPOADependencies], query: str, ret
 
     return pmids
 
-# Helper functions for dealing with HPO hierarchy
-HP_SYSTEM_ROOT = "HP:0000118"  # Phenotypic abnormality
-
+# Helper functions for dealing with ontology hierarchies
 async def children_of(ctx: RunContext[HPOADependencies], parent: str) -> List[str]:
-    """Direct children = subjects of subclass edges pointing to parent.
+    """Return the direct child terms for the supplied ontology identifier.
 
-    Note: synchronous helper (no awaiting needed).
+    Args:
+        ctx: Execution context with ontology adapters.
+        parent: Ontology identifier (HP or MONDO) whose children should be listed.
+
+    Returns:
+        List[str]: Identifiers of immediate child terms.
     """
     config = ctx.deps or get_config()
     if "hp" in parent.lower():
@@ -449,9 +489,14 @@ async def children_of(ctx: RunContext[HPOADependencies], parent: str) -> List[st
         return []
 
 async def parents_of(ctx: RunContext[HPOADependencies], child: str) -> List[str]:
-    """Direct parents = objects of subclass edges from child.
+    """Return the direct parent terms for the supplied ontology identifier.
 
-    Note: synchronous helper (no awaiting needed).
+    Args:
+        ctx: Execution context with ontology adapters.
+        child: Ontology identifier (HP or MONDO) whose parents should be listed.
+
+    Returns:
+        List[str]: Identifiers of immediate parent terms.
     """
     config = ctx.deps or get_config()
     if "hp" in child.lower():
@@ -466,12 +511,18 @@ async def parents_of(ctx: RunContext[HPOADependencies], child: str) -> List[str]
         return []
 
 async def categorize_hpo(ctx: RunContext[HPOADependencies], term: str) -> List[str]:
-    """
-    Categorize a term into top-level systems under HP:0000118.
-    Returns list like: ["HP:xxxxxxx (Label)", ...].
+    """Map an HPO term to the top-level organ system categories.
+
+    Args:
+        ctx: Execution context with ontology adapters.
+        term: HPO identifier to categorize.
+
+    Returns:
+        List[str]: Category identifiers rendered as "ID (Label)" strings.
     """
     config = ctx.deps or get_config()
     hp = config.get_hp_adapter()
+    HP_SYSTEM_ROOT = "HP:0000118"  # Phenotypic abnormality
     systems = await children_of(ctx, HP_SYSTEM_ROOT)
     try:
         ancestors = set(hp.ancestors(term, reflexive=True) or [])
@@ -480,9 +531,14 @@ async def categorize_hpo(ctx: RunContext[HPOADependencies], term: str) -> List[s
     return [f"{s} ({hp.label(s)})" for s in systems if s in ancestors]
 
 async def categorize_mondo(ctx: RunContext[HPOADependencies], term: str) -> List[str]:
-    """
-    Categorize a MONDO term into top-level categories under MONDO:0700096 (human disease).
-    Returns list like: ["MONDO:xxxxxxx (Label)", ...].
+    """Map a MONDO term to high-level disease group categories.
+
+    Args:
+        ctx: Execution context with ontology adapters.
+        term: MONDO identifier to categorize.
+
+    Returns:
+        List[str]: Category identifiers rendered as "ID (Label)" strings.
     """
     config = ctx.deps or get_config()
     mondo = config.get_mondo_adapter()

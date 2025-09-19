@@ -17,7 +17,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import ModelHTTPError
-from aurelian.agents.hpoa.hpoa_config import HPOAResponse, get_config
+from aurelian.agents.hpoa.hpoa_config import HPOAResponse, HPOADependencies, get_config
 from aurelian.agents.hpoa.hpoa_tools import (
     search_hp,
     search_mondo,
@@ -36,14 +36,17 @@ from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModel
 
 # system prompts
 HPOA_SYSTEM_PROMPT = ("""
-You are an expert HPO/MONDO/OMIM biocurator. Be fast and friendly; ask follow ups as needed.
+You are an expert HPO/MONDO/OMIM biocurator and skilled epidemiologist. Be fast and friendly; ask follow ups as needed.
 
 OUTPUT
-- Always return:
-  - explanation: short free-text answer (no JSON here). Do not narrate your process, respond conversationally.
-  - annotations: one object with field rows: [HPOA rows] (may be empty).
-- If asked for "all annotations": return rows with status "existing" and empty rationale; also include a copyable JSON block: {"explanation":"...","annotations":{...}}.
-- Status values (one word): existing | add | edit | remove
+- Always return two fields:
+  - explanation: a short, conversational answer. This may be free text OR structured content (JSON, YAML, tables) depending on what is most natural for the result. 
+    * If structured (e.g. OMIM clinical synopsis, JSON tool output), wrap it in a fenced code block (```json … ```).
+    * If free text, just return a few sentences. Do not narrate your reasoning steps.
+  - annotations: always include this field.
+    * In Q&A mode: annotations MUST be empty (\{\}). 
+    * Exception: if the user explicitly asks for "all annotations," return rows with status "existing" and empty rationale. This is the **only** time annotations are filled in during Q&A.
+    * In Curation mode: annotations.rows may be populated with status add/edit/remove/existing as appropriate.
 - Show CURIEs as ID (label). Normalize to HP:nnnnnnn and MONDO:nnnnnnn.
 
 WORKFLOW
@@ -53,14 +56,18 @@ WORKFLOW
 
 2) Q&A mode
    - Be brief and direct. Ask one short clarifying question only if necessary.
-   - Use only: filter_hpoa, search_hp, search_mondo, categorize_hpo.
-   - Do NOT call literature tools (pubmed_search_pmids, lookup_pmid, get_omim_clinical).
+   - annotations must remain empty, EXCEPT when the user explicitly requests "all annotations".
+   - If "all annotations" is requested, return the full set of rows with status=existing.
+   - Use only: filter_hpoa, search_hp, search_mondo, categorize_hpo, get_omim_clinical.
+   - Do NOT call literature tools (pubmed_search_pmids or lookup_pmid).
    - Disease -> phenotypes: filter_hpoa (up to 20 unless user requests "all").
    - Phenotype concept: search_hp (return ID, label, definition).
    - Category within disease: filter_hpoa then categorize_hpo.
+   - Facts about a disease: search_mondo, categorize_mondo. 
+   - Get OMIM clinical synopsis for disease: get_omim_clinical and return the JSON in explanation.
    - If nothing found: say "No matching results were found."
    - annotations must remain empty unless user asked for "all annotations".
-   - If the user asks an off-topic question, briefly reply and remind them of your scope.
+   - If the user proposes an off-topic question or statement, briefly reply (using no tools) and remind them of your scope.
 
 3) Curation mode
    - Use as needed: search_mondo, get_omim_terms, search_hp, pubmed_search_pmids, lookup_pmid, get_omim_clinical.
@@ -93,7 +100,7 @@ TOOL USAGE
 - search_mondo: resolve MONDO terms by ID/label.
 - categorize_mondo: map MONDO terms to high-level disease groups when asked.
 - get_omim_terms: resolve OMIM CURIEs and labels.
-- get_omim_clinical: retrieve OMIM clinical features; if used as evidence, evidence=IEA.
+- get_omim_clinical: retrieve OMIM clinical features; prioritize top results. If used as evidence, evidence=IEA.
 - pubmed_search_pmids: find PMIDs by query.
 - lookup_pmid: fetch details for a PMID; if PMID appears in reference, evidence=PCS.
 
@@ -103,7 +110,7 @@ AMBIGUITY/TIME
 
 # This simpler prompt is used for the "simple" agent variant.
 HPOA_SIMPLE_SYSTEM_PROMPT = ("""
-You are an expert biocurator for HPO and MONDO. Default to fast, friendly, conversational Q&A. Do not narrate your process; ask follow ups as needed.
+You are an expert biocurator for HPO and MONDO and skilled epidemiologist. Default to fast, friendly, conversational Q&A. Do not narrate your process; ask follow ups as needed.
 Use your own scientific knowledge for general explanations, but all ontology IDs/labels/definitions MUST come from tools.
 
 WORKFLOW
@@ -266,23 +273,37 @@ hpoa_simple_agent = Agent(
 )
 
 # retry to avoid transient API errors
-@retry(wait=wait_random_exponential(min=0, max=30),
+@retry(wait=wait_random_exponential(min=0, max=10),
        stop=stop_after_attempt(3),
        retry=(retry_if_exception_type(ModelHTTPError) | retry_if_exception_type(OpenAIError)),
        reraise=True)
 def call_agent_with_retry(
     input: str,
     agent: Agent = hpoa_agent,
+    model: Optional[str] = None,
     tool_limit: int = 100,
     use_history: bool = True,
+    deps: Optional[HPOADependencies] = None,
+    usage_limits: Optional[UsageLimits] = None,
+    message_history: Optional[list[ModelMessage]] = None,
 ):
+    if model:
+        agent.model = model
+    history = None
     if use_history:
         load_history()
+        history = MSG_HISTORY if MSG_HISTORY else None
+    elif message_history:
+        history = message_history
+
+    deps = deps or get_config()
+    usage_limits = usage_limits or UsageLimits(request_limit=tool_limit)
+
     result = agent.run_sync(
         input,
-        deps=get_config(),
-        usage_limits=UsageLimits(request_limit=tool_limit),
-        message_history=MSG_HISTORY if use_history and MSG_HISTORY else None,
+        deps=deps,
+        usage_limits=usage_limits,
+        message_history=history,
     )
 
     if use_history:
@@ -293,17 +314,31 @@ def call_agent_with_retry(
 # without retry
 def call_agent(
     input: str,
-    agent: Agent = hpoa_simple_agent,
-    tool_limit: int = 50,
+    agent: Agent = hpoa_agent,
+    model: Optional[str] = None,
+    tool_limit: int = 100,
     use_history: bool = True,
+    deps: Optional[HPOADependencies] = None,
+    usage_limits: Optional[UsageLimits] = None,
+    message_history: Optional[list[ModelMessage]] = None,
 ):
+    if model:
+        agent.model = model
+    history = None
     if use_history:
         load_history()
+        history = MSG_HISTORY if MSG_HISTORY else None
+    elif message_history:
+        history = message_history
+
+    deps = deps or get_config()
+    usage_limits = usage_limits or UsageLimits(request_limit=tool_limit)
+
     result = agent.run_sync(
         input,
-        deps=get_config(),
-        usage_limits=UsageLimits(request_limit=tool_limit),
-        message_history=MSG_HISTORY if use_history and MSG_HISTORY else None,
+        deps=deps,
+        usage_limits=usage_limits,
+        message_history=history,
     )
     if use_history:
         MSG_HISTORY.extend(result.new_messages())

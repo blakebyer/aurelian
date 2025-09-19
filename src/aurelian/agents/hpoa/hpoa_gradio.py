@@ -51,36 +51,40 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
         return str(data)
     
     def get_info(query: str, history: List[str]) -> str:
-        # Minimal handler; Gradio renders Markdown/newlines in returned string
-        try:
-            # Preflight checks for required API keys and common setup issues
-            openai_key = os.environ.get("OPENAI_API_KEY")
-            if not openai_key:
-                return (
-                    "Missing required environment variable: OPENAI_API_KEY.\n\n"
-                    "Set it before launching. Examples:\n"
-                    "- PowerShell: `$env:OPENAI_API_KEY = 'sk-...'`\n"
-                    "- Bash: `export OPENAI_API_KEY=sk-...`\n\n"
-                    "After setting the key, restart the app."
-                )
+        # Debug prints
+        print(f"QUERY = {query}")
+        print(f"HISTORY = {history}")
 
-            # Stateless agent call per request
+        # Merge history into the query string
+        if history:
+            query += "\n\n## History"
+            for h in history:
+                if isinstance(h, (list, tuple)) and len(h) == 2:
+                    role, msg = h
+                    query += f"\n{role.upper()}: {msg}"
+                else:
+                    query += f"\n{h}"
+
+        # Check for required key before running
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if not openai_key:
+            return (
+                "Missing required environment variable: OPENAI_API_KEY.\n\n"
+                "Set it before launching. Examples:\n"
+                "- PowerShell: `$env:OPENAI_API_KEY = 'sk-...'`\n"
+                "- Bash: `export OPENAI_API_KEY=sk-...`\n\n"
+                "After setting the key, restart the app."
+            )
+
+        try:
+            # Call the agent with retries
             result = call_agent_with_retry(query)
-            # Prefer conversational text; append a copyable JSON block when annotations are present
             return format_agent_result(result)
+
         except Exception as e:
             msg = str(e)
             if "rate limit" in msg.lower() or "429" in msg:
-                return (
-                    "Error: rate limit exceeded. Please try again in a few seconds.\n\n"
-                    f"Details: {msg}"
-                )
-            # Improve error visibility for missing credentials
-            if "OPENAI" in msg.upper() or "API KEY" in msg.upper():
-                return (
-                    "Error: model call failed. This often indicates a missing or invalid OPENAI_API_KEY.\n\n"
-                    f"Details: {msg}"
-                )
+                return f"Error: rate limit exceeded. Details: {msg}"
             return f"Error calling agent: {msg}"
 
     return gr.ChatInterface(
@@ -92,10 +96,14 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
                 "</div>",
         chatbot=gr.Chatbot(type="messages", show_copy_button=True, render_markdown=True),
         examples=[
+            ["Tell me what you know about MONDO:0011518"],
+            ["What body system is HP:0009939 (mandibular aplasia)?"],
             ["Which phenotypes for Charcot-Marie tooth disease affect females?"],
+            ["List the top 10 phenotypes by frequency for Digeorge syndrome"],
+            ["Return the OMIM Clinical Synopsis for Cystic fibrosis"],
             ["Suggest removal of phenotype annotations with poor evidence for ORPHA:580"],
             ["Propose new annotations for Fabry disease based on PMID:21092187"],
-            ["List the top 10 phenotypes by frequency for Digeorge syndrome"],
+            ["Which phenotypes for MPS III listed in PMID:32201668 are contained or missing from HPOA?"],
         ]
     )
 
@@ -121,4 +129,4 @@ if __name__ == "__main__":
 
     ui = chat()
     print(f"Launching Gradio on http://{host}:{port}")
-    ui.launch(server_name=host, server_port=port, inbrowser=True, share=True)
+    ui.launch(server_name=host, server_port=port, inbrowser=True)

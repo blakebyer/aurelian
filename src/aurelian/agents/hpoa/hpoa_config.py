@@ -54,8 +54,8 @@ class HPOAResponse(BaseModel):
     """
     Flexible output for conversational + structured use.
 
-    - explanation: free-form response for conversational answers or reasoning narrative
-    - annotations: optional structured block for curation actions; leave empty when not applicable
+    - explanation: free-form response for conversational answers, non HPOA JSON, or reasoning narrative
+    - annotations: optional structured HPOA block for curation actions; leave empty when not applicable
     """
     explanation: str = Field(..., description="A brief natural language explanation of what was found and done.")
     annotations: List[HPOAResult]

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import inspect
 from typing import Any, Awaitable, Callable, Optional, List
 
 from aurelian.utils.async_utils import run_sync
@@ -153,8 +154,11 @@ def run_agent(
         query: Text query for direct mode
         ui: Whether to force UI mode
         specialist_agent_name: Name of the agent class to run
-        agent_func_name: Name of the function to run the agent
+        agent_func_name: Name of the callable used for direct mode. The
+            resolver checks the agent instance first, then the module to
+            support helpers like `call_agent_with_retry`.
         join_char: Character to join multi-part queries with
+        use_cborg: Whether to use the CBORG proxy for the model
         kwargs: Additional arguments for the agent
     """
     # DEPRECATED: use the new agent command instead
@@ -201,10 +205,28 @@ def run_agent(
     if not ui and query:
         # Direct query mode
         
+        # Resolve the callable, preferring the agent instance and
+        # falling back to module-level helpers if present.
+        if hasattr(agent, agent_func_name):
+            agent_run_func = getattr(agent, agent_func_name)
+        elif hasattr(agent_class, agent_func_name):
+            agent_run_func = getattr(agent_class, agent_func_name)
+        else:
+            raise AttributeError(
+                f"{agent_name} agent has no callable '{agent_func_name}'"
+            )
+
+        call_kwargs = dict(agent_run_options)
+        if 'deps' not in call_kwargs:
+            call_kwargs['deps'] = deps
+
+        sig = inspect.signature(agent_run_func)
+        if 'agent' in sig.parameters and 'agent' not in call_kwargs:
+            call_kwargs['agent'] = agent
+
         # Run the agent and print results
-        agent_run_func = getattr(agent, agent_func_name)
-        r = agent_run_func(join_char.join(query), deps=deps, **agent_run_options)
-        print(r.data)
+        r = agent_run_func(join_char.join(query), **call_kwargs)
+        print(r.output)
         mjb = r.all_messages_json()
         # decode messages from json bytes to dict:
         if isinstance(mjb, bytes):
@@ -279,7 +301,7 @@ def agent(ui, query, agent, use_cborg=False, run_evals=False, **kwargs):
         # Run the agent and print results
         agent_run_func = getattr(agent_obj, "run_sync")
         r = agent_run_func(join_char.join(query), deps=deps, **agent_run_options)
-        print(r.data)
+        print(r.output)
         mjb = r.all_messages_json()
         # decode messages from json bytes to dict:
         if isinstance(mjb, bytes):
@@ -299,7 +321,7 @@ def agent(ui, query, agent, use_cborg=False, run_evals=False, **kwargs):
 
         async def run_agent(inputs: str) -> Any:
             result = await agent_obj.run(inputs, deps=deps, **agent_run_options)
-            return result.data
+            return result.output
         
         eval_func: Callable[[str], Awaitable[str]] = run_agent
         report = dataset.evaluate_sync(eval_func)
@@ -693,7 +715,7 @@ def hpoa(ui, query, **kwargs):
     - Direct query: ask disease→phenotypes (OMIM/MONDO/label/PMID) or phenotype concept questions (HP:ID/label).
     - UI: start an interactive chat interface.
     """
-    run_agent("hpoa", "aurelian.agents.hpoa", query=query, ui=ui, **kwargs)
+    run_agent("hpoa", "aurelian.agents.hpoa", query=query, ui=ui, agent_func_name="call_agent", **kwargs)
 
 
 @main.command()
