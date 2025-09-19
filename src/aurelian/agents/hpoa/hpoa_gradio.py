@@ -53,17 +53,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
     def get_info(query: str, history: List[str]) -> str:
         # Debug prints
         print(f"QUERY = {query}")
-        print(f"HISTORY = {history}")
-
-        # Merge history into the query string
-        if history:
-            query += "\n\n## History"
-            for h in history:
-                if isinstance(h, (list, tuple)) and len(h) == 2:
-                    role, msg = h
-                    query += f"\n{role.upper()}: {msg}"
-                else:
-                    query += f"\n{h}"
+        print("HISTORY =", json.dumps(history, indent=2, ensure_ascii=False))
 
         # Check for required key before running
         openai_key = os.environ.get("OPENAI_API_KEY")
@@ -103,7 +93,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
             ["Return the OMIM Clinical Synopsis for Cystic fibrosis"],
             ["Suggest removal of phenotype annotations with poor evidence for ORPHA:580"],
             ["Propose new annotations for Fabry disease based on PMID:21092187"],
-            ["Which phenotypes for MPS III listed in PMID:32201668 are contained or missing from HPOA?"],
+            ["Which phenotypes for MPS III listed in PMID:32201668 are contained in HPOA?"],
         ]
     )
 
