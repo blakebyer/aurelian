@@ -44,8 +44,8 @@ class HPOA(BaseModel):
         return data
 
 class HPOAResult(BaseModel):
-    status: Literal["existing", "new", "updated", "removed"] = Field(
-        ..., description="Whether this annotation was existing, new, updated, or suggested for removal from the phenotype.hpoa file."
+    status: Literal["existing", "new", "changed", "removed"] = Field(
+        ..., description="Whether this annotation was existing, new, changed, or suggested for removal from the phenotype.hpoa file."
     )
     rationale: Optional[str] = None
     annotation: HPOA
