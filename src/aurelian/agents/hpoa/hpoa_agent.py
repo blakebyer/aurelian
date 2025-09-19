@@ -204,12 +204,12 @@ hpoa_reasoning_agent = Agent(
     system_prompt=HPOA_SYSTEM_PROMPT,
     history_processors=[keep_recent_messages],
     tools=[
-       # local DB
-        Tool(ToolLimiter(filter_hpoa, max_calls=5).wrap()),
-        Tool(ToolLimiter(search_hp, max_calls=50).wrap()),
-        Tool(ToolLimiter(categorize_hpo, max_calls=50).wrap()),
-        Tool(ToolLimiter(categorize_mondo, max_calls=5).wrap()),
-        Tool(ToolLimiter(search_mondo, max_calls=5).wrap()),
+        # local DB
+        Tool(filter_hpoa),
+        Tool(search_hp),
+        Tool(categorize_hpo),
+        Tool(categorize_mondo),
+        Tool(search_mondo),
 
         # APIs
         Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
@@ -227,17 +227,17 @@ hpoa_agent = Agent(
     history_processors=[keep_recent_messages],
     tools=[
         # local DB
-        Tool(ToolLimiter(filter_hpoa, max_calls=5).wrap()),
-        Tool(ToolLimiter(search_hp, max_calls=50).wrap()),
-        Tool(ToolLimiter(categorize_hpo, max_calls=50).wrap()),
-        Tool(ToolLimiter(categorize_mondo, max_calls=5).wrap()),
-        Tool(ToolLimiter(search_mondo, max_calls=5).wrap()),
+        Tool(filter_hpoa),
+        Tool(search_hp),
+        Tool(categorize_hpo),
+        Tool(categorize_mondo),
+        Tool(search_mondo),
 
         # APIs
-        Tool(ToolLimiter(get_omim_terms, max_calls=3).wrap()),
-        Tool(ToolLimiter(get_omim_clinical, max_calls=3).wrap()),
-        Tool(ToolLimiter(lookup_pmid_text, max_calls=3).wrap()),
-        Tool(ToolLimiter(pubmed_search_pmids, max_calls=3).wrap()),
+        Tool(ToolLimiter(get_omim_terms, max_calls=5).wrap()),
+        Tool(ToolLimiter(get_omim_clinical, max_calls=5).wrap()),
+        Tool(ToolLimiter(lookup_pmid_text, max_calls=5).wrap()),
+        Tool(ToolLimiter(pubmed_search_pmids, max_calls=5).wrap()),
     ],
 )
 
@@ -248,12 +248,12 @@ hpoa_simple_agent = Agent(
     system_prompt=HPOA_SIMPLE_SYSTEM_PROMPT,
     history_processors=[keep_recent_messages],
     tools=[
-        Tool(ToolLimiter(search_hp, max_calls=10).wrap()),
-        Tool(ToolLimiter(categorize_hpo, max_calls=10).wrap()),
-        Tool(ToolLimiter(search_mondo, max_calls=10).wrap()),
-        Tool(ToolLimiter(categorize_mondo, max_calls=10).wrap()),
-        Tool(ToolLimiter(children_of, max_calls=3).wrap()),
-        Tool(ToolLimiter(parents_of, max_calls=3).wrap()),
+        Tool(search_hp),
+        Tool(categorize_hpo),
+        Tool(search_mondo),
+        Tool(categorize_mondo),
+        Tool(children_of),
+        Tool(parents_of),
     ],
 )
 
@@ -265,7 +265,7 @@ hpoa_simple_agent = Agent(
 def call_agent_with_retry(
     input: str,
     agent: Agent = hpoa_agent,
-    tool_limit: int = 100,
+    tool_limit: int = 150,
     use_history: bool = True,
 ):
     if use_history:
