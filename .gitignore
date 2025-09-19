@@ -136,6 +136,8 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+tests/data/*pdfs/
+.claude
 
 # hpoa agent
 hpoa.db
