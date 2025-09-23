@@ -8,7 +8,7 @@ import datetime
 from pathlib import Path
 from typing import Optional
 from openai import OpenAIError
-from tenacity import retry, wait_random_exponential, stop_after_attempt, stop_after_delay, retry_if_exception_type, RetryError
+from tenacity import retry, wait_random_exponential, stop_after_attempt, stop_after_delay, retry_if_exception_type, AsyncRetrying
 from pydantic_ai import Agent, Tool
 from pydantic_ai.messages import (
     ModelMessage,
@@ -18,7 +18,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import ModelHTTPError
 from aurelian.agents.hpoa.hpoa_config import HPOAResponse, HPOADependencies, get_config
-from aurelian.utils.async_utils import run_sync as agent_run_sync
+from aurelian.utils.async_utils import run_sync
 from aurelian.agents.hpoa.hpoa_tools import (
     batch_search_hp, 
     batch_search_mondo,
@@ -349,4 +349,4 @@ async def call_agent(
 
 def call_agent_sync(*args, **kwargs):
     """Synchronous wrapper for call_agent_with_retry."""
-    return agent_run_sync(call_agent_with_retry(*args, **kwargs))
+    return run_sync(call_agent_with_retry(*args, **kwargs))

@@ -3,8 +3,7 @@ from typing import List, Optional, Any
 import os
 import json
 import gradio as gr
-from .hpoa_agent import call_agent_with_retry, call_agent
-from aurelian.utils.async_utils import run_sync as agent_run_sync
+from aurelian.agents.hpoa.hpoa_agent import call_agent_with_retry, call_agent
 from .hpoa_config import HPOADependencies
 
 
@@ -51,7 +50,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
 
         return str(data)
     
-    def get_info(query: str, history: List[Any]) -> str:
+    async def get_info(query: str, history: List[Any]) -> str:
         # Debug prints
         print(f"QUERY = {query}")
         print("HISTORY =", json.dumps(history, indent=2, ensure_ascii=False))
@@ -69,7 +68,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
 
         try:
             # Call the agent with retries
-            result = agent_run_sync(call_agent_with_retry(query))
+            result = await call_agent_with_retry(query)
             return format_agent_result(result)
 
         except Exception as e:
