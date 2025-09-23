@@ -1,18 +1,17 @@
 """
 Tools for interacting with MONDO, HPO, and HPOA files.
 """
-from typing import List, Literal
+from typing import List, Literal, Dict
 from typing_extensions import TypedDict
 import httpx
-import re, sqlite3
+import re, sqlite3, inspect
 from pydantic_ai import RunContext, ModelRetry
-from .hpoa_config import HPOADependencies, HPOA, get_config
+from .hpoa_config import HPOADependencies, HPOA, get_config, get_client
 from aurelian.agents.literature.literature_tools import (
     lookup_pmid as literature_lookup_pmid,
     literature_search_pmids as literature_search_pmids,
     )
 from oaklib.datamodels.search import SearchConfiguration
-import inspect as _inspect
 
 async def search_hp(ctx: RunContext[HPOADependencies], term: str) -> List[dict]:
     """Look up HPO phenotypic abnormality terms by CURIE or partial label.
@@ -46,7 +45,7 @@ async def search_hp(ctx: RunContext[HPOADependencies], term: str) -> List[dict]:
     # Label search
     try:
         bs = hp.basic_search(q, SearchConfiguration(is_partial=True))
-        if _inspect.iscoroutine(bs):
+        if inspect.iscoroutine(bs):
             bs = await bs
         found = list(bs)
     except Exception:
@@ -98,7 +97,7 @@ async def search_mondo(ctx: RunContext[HPOADependencies], term: str) -> List[dic
     # Label search
     try:
         bs = mondo.basic_search(q, SearchConfiguration(is_partial=True))
-        if _inspect.iscoroutine(bs):
+        if inspect.iscoroutine(bs):
             bs = await bs
         found = list(bs)
     except Exception:
@@ -116,6 +115,93 @@ async def search_mondo(ctx: RunContext[HPOADependencies], term: str) -> List[dic
             })
         except Exception:
             results.append({"id": curie, "label": None, "definition": None})
+    return results
+
+async def batch_search_hp(ctx: RunContext[HPOADependencies], terms: List[str]) -> List[Dict]:
+    """Look up multiple HPO phenotypic abnormality terms by CURIE or partial label.
+
+    Args:
+        ctx: Execution context providing ontology adapters.
+        terms: List of search strings; each may be an HP CURIE or free-text label.
+
+    Returns:
+        List[dict]: Resolved HP term dictionaries with `id`, `label`, and `definition` keys.
+    """
+    config = ctx.deps or get_config()
+    hp = config.get_hp_adapter()
+    results: List[Dict] = []
+    ids: List[str] = []
+
+    for t in terms:
+        q = (t or "").strip()
+        if not q:
+            continue
+
+        if q.lower().startswith("hp:"):
+            ids.append(q.upper())
+            continue
+
+        try:
+            bs = hp.multiterm_search([q], SearchConfiguration(is_partial=True))
+            found = await bs if inspect.iscoroutine(bs) else list(bs)
+            ids.extend([c for c in found if isinstance(c, str) and c.startswith("HP:")])
+        except Exception:
+            pass
+
+    for curie in set(ids):
+        try:
+            results.append({
+                "id": curie,
+                "label": hp.label(curie),
+                "definition": hp.definition(curie),
+            })
+        except Exception:
+            results.append({"id": curie, "label": None, "definition": None})
+
+    return results
+
+
+async def batch_search_mondo(ctx: RunContext[HPOADependencies], terms: List[str]) -> List[Dict]:
+    """Look up multiple MONDO disease terms by CURIE or partial label.
+
+    Args:
+        ctx: Execution context providing ontology adapters.
+        terms: List of search strings; each may be a MONDO CURIE or free-text label.
+
+    Returns:
+        List[dict]: Resolved MONDO term dictionaries with `id`, `label`, and `definition` keys.
+    """
+    config = ctx.deps or get_config()
+    mondo = config.get_mondo_adapter()
+    results: List[Dict] = []
+    ids: List[str] = []
+
+    for t in terms:
+        q = (t or "").strip()
+        if not q:
+            continue
+
+        if q.lower().startswith("mondo:"):
+            ids.append(q.upper())
+            continue
+
+        try:
+            bs = mondo.multiterm_search([q], SearchConfiguration(is_partial=True))
+            found = await bs if inspect.iscoroutine(bs) else list(bs)
+            ids.extend([c for c in found if isinstance(c, str) and c.startswith("MONDO:")])
+        except Exception:
+            pass
+
+    for curie in set(ids):
+        try:
+            results.append({
+                "id": curie,
+                "label": mondo.label(curie),
+                "definition": mondo.definition(curie),
+            })
+        except Exception:
+            results.append({"id": curie, "label": None, "definition": None})
+
     return results
 
 async def get_omim_terms(ctx: RunContext[HPOADependencies], label: str):
@@ -144,8 +230,8 @@ async def get_omim_terms(ctx: RunContext[HPOADependencies], label: str):
         "Accept": "application/json",
         "User-Agent": "aurelian-hpoa/1.0",
     }
-    async with httpx.AsyncClient(timeout = 30.0, follow_redirects=True) as client:
-        r = await client.get(url, params=params, headers=headers)
+    client = get_client()
+    r = await client.get(url, params=params, headers=headers)
     try:
         r.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -177,14 +263,14 @@ async def get_omim_clinical(ctx: RunContext[HPOADependencies], label: str):
         "format": "json",
         "include": "clinicalSynopsis",
         "apiKey": OMIM_API_KEY or "",
-        "limit": "10", # limit results
+        "limit": "5", # limit results
     }
     headers = {
         "Accept": "application/json",
         "User-Agent": "aurelian-hpoa/1.0",
     }
-    async with httpx.AsyncClient(timeout = 30.0, follow_redirects=True) as client:
-        r = await client.get(url, params=params, headers=headers)
+    client = get_client()
+    r = await client.get(url, params=params, headers=headers)
     try:
         r.raise_for_status()
     except httpx.HTTPStatusError as e:
@@ -446,18 +532,18 @@ async def pubmed_search_pmids(ctx: RunContext[HPOADependencies], query: str, ret
 
     print(f"SEARCH PUBMED FOR PMIDs RELATED TO: {query}")
 
-    async with httpx.AsyncClient(timeout = 30.0, follow_redirects=True) as client:
-        r = await client.get(url, params=params, headers=headers)
-        try:
-            r.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise ModelRetry(
-                f"PubMed search failed: {e.response.status_code} {e.response.text[:200]}"
-            )
-        try:
-            data = r.json()
-        except ValueError:
-            raise ModelRetry("PubMed search returned non-JSON response")
+    client = get_client()
+    r = await client.get(url, params=params, headers=headers)
+    try:
+        r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise ModelRetry(
+            f"PubMed search failed: {e.response.status_code} {e.response.text[:200]}"
+        )
+    try:
+        data = r.json()
+    except ValueError:
+        raise ModelRetry("PubMed search returned non-JSON response")
 
     # Extract PMIDs from JSON
     pmids = data.get("esearchresult", {}).get("idlist", [])

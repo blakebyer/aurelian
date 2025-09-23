@@ -41,6 +41,29 @@ async def search_mondo(term: str) -> List[dict]:
     """Search MONDO by ID or label (MONDO:nnnnnnn or text). Returns top matches."""
     return await ht.search_mondo(ctx(), term)
 
+@mcp.tool()
+async def batch_search_mondo(terms: List[str]) -> List[dict]:
+    """Batch search MONDO by CURIE or partial label.
+    
+    Args:
+        terms: List of MONDO CURIEs or free-text disease labels.
+    
+    Returns:
+        List[dict]: Each entry has `id`, `label`, and `definition`.
+    """
+    return await ht.batch_search_mondo(ctx(), terms)
+
+@mcp.tool()
+async def batch_search_hp(terms: List[str]) -> List[dict]:
+    """Batch search HPO by CURIE or partial label.
+    
+    Args:
+        terms: List of HPO CURIEs or free-text disease labels.
+    
+    Returns:
+        List[dict]: Each entry has `id`, `label`, and `definition`.
+    """
+    return await ht.batch_search_hp(ctx(), terms)
 
 @mcp.tool()
 async def get_omim_terms(label: str) -> dict:

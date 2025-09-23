@@ -166,8 +166,21 @@ async def search_literature_web(query: str) -> str:
 # Search the web for PMIDs related to a query
 async def literature_search_pmids(query: str) -> list:
     """
-    Search the web for scientific literature and extract PubMed IDs (PMIDs) from the results.
-    Only performs a simple web search and regex extraction of PMIDs from PubMed URLs.
+    Search the web for PubMed article links and extract PubMed IDs (PMIDs).
+
+    This function runs a simple web search for the given query, scans the results for
+    PubMed URLs, and extracts numeric PMIDs using a regular expression. Duplicate
+    IDs are removed, and all returned values are normalized with the "PMID:" prefix.
+
+    Args:
+        query (str): Free-text search string describing the biomedical topic of interest.
+
+    Returns:
+        list[str]: A list of unique PubMed IDs in the format "PMID:<number>".
+                   Returns an empty list if no IDs are found.
+
+    Raises:
+        ModelRetry: If no search results are found or if an error occurs during the search.
     """
     print(f"SEARCH WEB FOR PMIDs RELATED TO: {query}")
     try:

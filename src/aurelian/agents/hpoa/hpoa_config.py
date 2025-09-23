@@ -1,7 +1,7 @@
 """ Configuration file for HPOA Agent """
 from pydantic import BaseModel, Field, model_validator
 from dataclasses import dataclass, field
-import os, csv, sqlite3, re
+import os, csv, sqlite3
 from io import StringIO
 from typing import cast
 import pandas as pd
@@ -16,6 +16,14 @@ from aurelian.dependencies.workdir import HasWorkdir, WorkDir
 # Module-level singletons for ontology adapters to avoid repeated loads
 HP_ADAPTER_SINGLETON: Optional[BasicOntologyInterface] = None
 MONDO_ADAPTER_SINGLETON: Optional[BasicOntologyInterface] = None
+client: Optional[httpx.AsyncClient] = None
+
+def get_client() -> httpx.AsyncClient:
+    """Return a shared AsyncClient for connection reuse (faster API calls)."""
+    global client
+    if client is None:
+        client = httpx.AsyncClient(timeout=15.0, follow_redirects=True)
+    return client
 
 class HPOA(BaseModel):
     database_id: str = Field(..., description="Refers to the database `disease_name` is drawn from. Must be formatted as a CURIE, e.g., OMIM:1547800 or MONDO:0021190")
@@ -24,10 +32,10 @@ class HPOA(BaseModel):
     hpo_id: str = Field(..., description="This field is for the HPO identifier for the term attributed to the `disease_name`.")
     reference: str = Field(..., description="""This field indicates the source of the information used for the annotation. This may be the clinical experience of the annotator, an article as indicated by a PMID, or an HPO collaborator ID, e.g. HPO:RefId. If a PMID cannot be found, default back to OMIM:mimNumber.""")	
     evidence: Literal["IEA", "PCS", "TAS"] = Field(..., description="""IEA (inferred from electronic annotation): annotations extracted from OMIM.
-                                                   PCS (published clinical study): annotations extracted from articles in the medical literature.
-                                                   TAS (traceable author statement): annotations extracted from knowledge bases such as OMIM or Orphanet that have derived the information from a published source..""")
+                                                   PCS (published clinical study): annotations extracted from articles in the medical literature (including PubMed).
+                                                   TAS (traceable author statement): annotations extracted from knowledge bases such as OMIM or Orphanet.""")
     onset: Optional[str] = Field(..., description="""A term-id from the HPO-sub-ontology below the term `Age of onset` (HP:0003674). Note that if an HPO onset term is used in this field, it refers to the onset of the feature specified in field `hpo_id` in the disease being annotated. If an HPO term is used for age of onset in field `hpo_id` then it refers to the overall age of onset of the disease.""")
-    frequency: Optional[str] = Field(..., description="""Must be a fraction (e.g., 7/13) or a percentage (e.g., 17%). Leave empty if unspecified.""")	
+    frequency: Optional[str] = Field(..., description="""Must be a fraction (e.g., 7/13), a percentage (e.g., 17%), or HPO frequency term (below the term HP:0040279). Leave empty if unspecified.""")	
     sex: Optional[Literal["MALE", "FEMALE", ""]] = Field(..., description="""This field contains the strings MALE or FEMALE if the annotation in question is limited to males or females. This field refers to the phenotypic (and not the chromosomal) sex. If a phenotype is limited to one sex then a modifier from the clinical modifier subontology should be noted in the modifier field.""")	
     modifier: Optional[str]	= Field(..., description="A term-id from the HPO-sub-ontology below the term `Clinical modifier`.")
     aspect: Literal["P", "I", "C", "M"] = Field(..., description="""Terms with the P aspect are located in the Phenotypic abnormality subontology.
@@ -87,10 +95,13 @@ class HPOADependencies(HasWorkdir):
         if self.ncbi_api_key is None:
             import os
             self.ncbi_api_key = os.environ.get("NCBI_API_KEY")
-
-        # establish default DB path
+        
+        # set hpoa db path
         if self.hpoa_db_path is None:
-            # Prefer explicit env workdir; otherwise, use current working directory.
+            save_path = os.environ.get("HPOA_DB")
+        if save_path:
+            self.hpoa_db_path = save_path
+        else:
             base = os.environ.get("AURELIAN_WORKDIR") or os.getcwd()
             self.hpoa_db_path = os.path.join(base, "hpoa.db")
 
@@ -121,6 +132,11 @@ class HPOADependencies(HasWorkdir):
         - Else if `./phenotype.hpoa` exists in the current working directory, load it.
         - Else download the latest `phenotype.hpoa` from GitHub and save it to the current working directory.
         """
+        # 0) env var override
+        if not path:
+            env_path = os.environ.get("HPOA_TSV")
+        if env_path and os.path.exists(env_path):
+            path = env_path
         # 1) Explicit path
         candidate_path = path
         if candidate_path and os.path.exists(candidate_path):
@@ -249,6 +265,8 @@ class HPOADependencies(HasWorkdir):
             # causes: "Safety level may not be changed inside a transaction".
             con.execute("PRAGMA journal_mode = MEMORY")
             con.execute("PRAGMA synchronous = OFF")
+            con.execute("PRAGMA temp_store = MEMORY")
+            con.execute("PRAGMA cache_size = -64000") # 64 MB in cache
 
             # Explicit transaction for bulk load
             con.execute("BEGIN IMMEDIATE")
@@ -318,6 +336,8 @@ class HPOADependencies(HasWorkdir):
         try:
             con.execute("PRAGMA journal_mode = MEMORY")
             con.execute("PRAGMA synchronous = OFF")
+            con.execute("PRAGMA temp_store = MEMORY")
+            con.execute("PRAGMA cache_size = -64000") # 64 MB cache
             # Replace table using pandas in a single efficient transaction
             df.to_sql("hpoa", con, if_exists="replace", index=False, chunksize=5000, method=None)
             cur = con.cursor()

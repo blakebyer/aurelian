@@ -2,10 +2,10 @@
 Agent for working with .hpoa files.
 """
 from __future__ import annotations
+import inspect, functools, os
+from typing import Any, Callable
 import datetime
-import inspect
 from pathlib import Path
-from functools import wraps
 from typing import Optional
 from openai import OpenAIError
 from tenacity import retry, wait_random_exponential, stop_after_attempt, stop_after_delay, retry_if_exception_type, RetryError
@@ -18,9 +18,10 @@ from pydantic_ai.messages import (
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai.exceptions import ModelHTTPError
 from aurelian.agents.hpoa.hpoa_config import HPOAResponse, HPOADependencies, get_config
+from aurelian.utils.async_utils import run_sync as agent_run_sync
 from aurelian.agents.hpoa.hpoa_tools import (
-    search_hp,
-    search_mondo,
+    batch_search_hp, 
+    batch_search_mondo,
     get_omim_terms,
     get_omim_clinical,
     lookup_pmid as lookup_pmid_text,
@@ -36,122 +37,92 @@ from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModel
 
 # system prompts
 HPOA_SYSTEM_PROMPT = ("""
-You are an expert HPO/MONDO/OMIM biocurator and skilled epidemiologist. Be fast and friendly; ask follow ups as needed.
+You are an expert HPO/MONDO/OMIM biocurator and epidemiologist. Respond quickly and accurately.
 
 OUTPUT
-- Always return two fields:
-  - explanation: a short, conversational answer (free text or structured).
-  - annotations: always include this field.
-    * In Q&A mode: leave empty, UNLESS the user explicitly asked to see existing annotations. 
-    * In that case, fill annotations with the existing rows (status = "existing").
-    * Never propose add/edit/remove rows in Q&A mode.
-    * In Curation mode: populate annotations.rows as needed (status = add/edit/remove/existing).
-- Show CURIEs as ID (label). Normalize to HP:nnnnnnn and MONDO:nnnnnnn.
+- Always return HPOAResponse (explanation + annotations).
+- Q&A mode: annotations=[] unless explicitly asked to "show annotations" or "list phenotypes for disease X".
+- Curation mode: include proposed annotations with rationale.
+- IMPORTANT: Any non-HPOA results (e.g. OMIM clinical synopsis, PubMed abstracts, tool results, general explanations) must go in the explanation only, never in annotations.
+
+CLASSIFICATION
+- Off-topic (not related to biology) → polite redirect, no tools, no workflow narration, annotations=[].
+- Otherwise → continue workflow.
 
 WORKFLOW
-1) Determine mode
-   - Q&A mode (default) unless user explicitly requests curation.
-   - Curation mode only when explicitly requested.
+Q&A (default):
+  1. filter_hpoa (phenotypes, limit=20 by default; use limit=None if user explicitly asks for "all")
+  2. batch_search_hp (resolve a list of phenotype labels/IDs together, preferably in one or very few searches)
+  3. batch_search_mondo (resolve a list of disease labels/IDs together, preferably in one or very few searches)
+  4. categorize_hpo/mondo (categories only if asked)
+  5. get_omim_clinical (OMIM synopsis → put result in explanation, annotations=[])
+  Stop when sufficient. Never propose new annotations.
 
-2) Handle general/off-topic prompts first
-   - If the user’s query is not about diseases or phenotypes (e.g., "hello", "tell me a joke", "tell me a science fact", etc.):
-       - Reply promptly in a friendly, conversational way. Remind them of your scope as a curation assistant and disease expert. 
-       - Do not call any tools.
-       - Keep annotations empty.
+Curation:
+  1. filter_hpoa (existing annotations, same limit rule: 20 default, "all" if requested)
+  2. Use PubMed tools (pubmed_search_pmids, lookup_pmid_text) only if adding/validating (evidence=PCS)
+  3. Populate annotations with rationale
 
-3) Q&A mode
-   - Default: annotations must remain empty.
-   - Exception: if the user explicitly asks to see existing annotations (e.g., "show the annotations for Fabry disease" or "list all phenotypes"), then populate annotations with the existing rows from HPOA.
-   - Do not create add/edit/remove annotations in Q&A mode. Only return existing ones if directly requested.
-   - Be brief and direct in the explanation. Ask one short clarifying question only if necessary.
-   - Use only: filter_hpoa, search_hp, search_mondo, categorize_hpo, get_omim_clinical.
-   - Do NOT call literature tools (pubmed_search_pmids or lookup_pmid).
-   - Disease -> phenotypes: filter_hpoa (up to 20 unless user requests "all").
-   - Phenotype concept: search_hp (return ID, label, definition).
-   - Category within disease: filter_hpoa then categorize_hpo.
-   - Facts about a disease: search_mondo, categorize_mondo.
-   - Get OMIM clinical synopsis: get_omim_clinical, place JSON in explanation.
-   - If nothing found: say "No matching results were found."
+ANNOTATION RULES
+- Removal requires strong justification from agent context and literature; do not remove based on frequency tags or evidence type alone (IEA/PCS/TAS).
+- evidence: PCS when given PMID, TAS for OMIM/Orphanet statements, IEA for automatic annotations
+- Do NOT remove terms just because they appear in other database_ids of the same disease.
+- When curating, if a phenotype differs by sex, frequency, onset, or modifier, add it as a separate annotation (duplicate phenotype with differing attributes).
+- Add/edit allowed with clear rationale.
+- All IDs must be valid CURIEs.
 
-4) Curation mode
-   - Use as needed: search_mondo, get_omim_terms, search_hp, pubmed_search_pmids, lookup_pmid, get_omim_clinical.
-   - Populate annotations.rows with HPOA rows; set status to existing/add/edit/remove.
-   - Add rows if you find sufficient evidence in the literature implicating phenotypes with the disease.
-   - Field rules:
-      - database_id: CURIE for the disease (e.g., OMIM:1547800 or MONDO:0021190).
-      - disease_name: Accepted disease name. Do not use synonyms.
-      - qualifier: NOT or blank.
-      - hpo_id: HPO identifier for the annotated phenotype.
-      - reference: PMID or CURIE (OMIM, Orphanet). If no PMID, default to OMIM:mimNumber.
-      - evidence:
-        - IEA: inferred from electronic annotation (e.g., OMIM clinical synopsis).
-        - PCS: published clinical study (PubMed).
-        - TAS: traceable author statement (knowledgebases citing a publication).
-      - onset: HPO term under "Age of onset" (HP:0003674).
-      - frequency: Fraction (e.g., 7/13), percent (e.g., 17%), or HPO frequency term.
-      - sex: MALE, FEMALE, or blank.
-      - modifier: HPO term under "Clinical modifier".
-      - aspect: P, I, C, or M.
-        - P: Phenotypic abnormality.
-        - I: Inheritance.
-        - C: Clinical course (onset, mortality, temporal aspects).
-        - M: Clinical modifier.
-        - biocuration: Auto-filled. Records curator ID and date (YYYY-MM-DD).
-   - If values differ by sex/onset/frequency, create separate rows.
-   - Choose edit vs remove:
-     - edit when phenotype is valid but fields need correction (sex/frequency/onset/evidence/reference).
-     - remove only when there is clearly no supporting evidence (apply a high bar).
-   - Include a copyable JSON block: {"explanation":"...","annotations":{...}}.
+STOPPING
+- Do not loop endlessly between tools.
+- If a tool returns nothing useful, report that clearly and stop.
+- End once enough information has been retrieved to answer the user's query.
 
-RELIABILITY
-- No hallucinations. Only output IDs, labels, and references verified by tools or HPOA rows.
-- If a lookup fails, state that you cannot verify rather than guessing.
+TOOL RULES
+- Tools may be called multiple times if the inputs are different or additional info is needed.
+- Do not re-call the same tool on identical input.
+- Deduplicate PMIDs; never look up the same PMID more than once.
+- Use PubMed tools only in curation or if explicitly requested.
+- Prefer batching to minimize repeated calls.
+- Tool failures: fallback gracefully, continue with partial info.
 
-TOOL USAGE
-- filter_hpoa: query HPOA rows by fields (disease_name, hpo_id, sex, onset, frequency, qualifier, evidence, reference). AND-combine filters. Default matching: exact for CURIEs, like for labels.
-- search_hp: resolve HPO terms by ID/label; verify labels for HP:IDs.
-- categorize_hpo: map HPO terms to organ-system categories under HP:0000118.
-- search_mondo: resolve MONDO terms by ID/label.
-- categorize_mondo: map MONDO terms to high-level disease groups when asked.
-- get_omim_terms: resolve OMIM CURIEs and labels.
-- get_omim_clinical: retrieve OMIM clinical features; prioritize top results. If used as evidence, evidence=IEA.
-- pubmed_search_pmids: find PMIDs by query.
-- lookup_pmid: fetch details for a PMID; if PMID appears in reference, evidence=PCS.
-
-AMBIGUITY/TIME
-- Do not over-search or stall. Ask one clarifying question or state more detail is needed.
+CRITICAL RULES
+- annotations field always exists
+- Explanations can include raw tool results if not annotations
+- Explanations must contain results only (no workflow narration).
+- Never guess CURIEs or PMIDs
+- CURIEs: ID (Label), e.g. HP:0001250 (Seizure)
+- Direct, professional tone
 """)
 
 # This simpler prompt is used for the "simple" agent variant.
 HPOA_SIMPLE_SYSTEM_PROMPT = ("""
-You are an expert biocurator for HPO and MONDO and skilled epidemiologist. Default to fast, friendly, conversational Q&A. Do not narrate your process; ask follow ups as needed.
+You are an expert biocurator for HPO and MONDO and a skilled epidemiologist. Default to fast, friendly Q&A. Do not narrate your process; ask follow ups if needed.
 Use your own scientific knowledge for general explanations, but all ontology IDs/labels/definitions MUST come from tools.
 
 WORKFLOW
-1) If the user asks about an HPO term:
-   - search_hp(HP:ID or label) for ID, label, definition.
-   - categorize_hpo(HP:ID) if they want its organ-system category.
+1) HPO terms:
+   - batch_search_hp(list of IDs/labels) → ID, label, definition.
+   - categorize_hpo(HP:ID) if organ-system category requested.
    - children_of(HP:ID) / parents_of(HP:ID) for direct children/parents (max 10).
 
-2) If the user asks about a MONDO term or disease:
-   - search_mondo(MONDO:ID or label) for ID, label, definition.
-   - categorize_mondo(MONDO:ID or label) for high-level grouping.
+2) MONDO terms:
+   - batch_search_mondo(list of IDs/labels) → ID, label, definition.
+   - categorize_mondo(MONDO:ID) if high-level grouping requested.
    - children_of(MONDO:ID) / parents_of(MONDO:ID) for direct children/parents (max 10).
 
-3) If the request is unclear, ask ONE short clarifying question.
-4) If a provided ID/label is invalid or not found, say you cannot find it.
+3) If unclear: ask one short clarifying question.
+4) If an ID/label is invalid or not found: say so directly.
 
 TOOL USE
-- Do NOT call tools unless necessary to verify or retrieve ontology facts.
-- Batch logically: one lookup per term; avoid repetitive calls for the same input.
+- Only call tools when needed to confirm ontology facts.
+- Prefer batching: resolve multiple terms together, avoid repeated calls.
 
 FORMATTING
-- Always show terms as: ID (Label). Example: HP:0004322 (Short stature).
-- When listing children/parents: return up to 10. If none, say "no children" or "no parents".
+- Show terms as: ID (Label), e.g. HP:0004322 (Short stature).
+- Children/parents: list up to 10, otherwise say "no children" or "no parents".
 - Be brief and direct.
 
 RELIABILITY
-- Absolutely no hallucinations: ontology IDs, labels, definitions must come from tools.
+- No hallucinations: all ontology facts must come from tools.
 - If tools return nothing, state that clearly.
 - Stay on scope; politely decline off-topic requests.
 """)
@@ -161,6 +132,7 @@ MSG_HISTORY: list[ModelMessage] = []
 MAX_HISTORY = 3
 
 # create history directory and history file per session
+HPOA_HISTORY = os.environ.get("HPOA_HISTORY", "1") == "1"
 HISTORY_FOLDER = Path("hpoa_history")
 HISTORY_FOLDER.mkdir(exist_ok=True, parents=True)
 SESSION_FILENAME = datetime.datetime.now().strftime("%m-%d-%Y_%H-%M-%S")
@@ -201,23 +173,27 @@ async def keep_recent_messages(messages: list[ModelMessage]) -> list[ModelMessag
     return messages[-MAX_HISTORY:]
 
 # Tool limiter helper class
-class ToolLimiter:
-    def __init__(self, func, max_calls: int):
+class LimitedTool:
+    def __init__(self, func: Callable, max_calls: int):
         self.func = func
         self.max_calls = max_calls
         self.calls = 0
 
-    def wrap(self):
+    def wrap(self) -> Callable:
+        """Return a wrapped function with the same signature as the original,
+        enforcing a maximum number of calls.
+        """
         sig = inspect.signature(self.func)
 
-        @wraps(self.func)
-        async def wrapper(*args, **kwargs):
+        @functools.wraps(self.func)
+        async def wrapper(*args, **kwargs) -> Any:
             if self.calls >= self.max_calls:
-                return {"error": f"{self.func.__name__} exceeded {self.max_calls} calls"}
+                # return soft (non-terminating) error
+                return {"note": f"{self.func.__name__} skipped (limit {self.max_calls} calls reached)"}
             self.calls += 1
             return await self.func(*args, **kwargs)
 
-        wrapper.__signature__ = sig
+        wrapper.__signature__ = sig  # keep ctx, term, etc. visible to Tool
         return wrapper
 
 # Reasoning agent (not used in typical flows but available)
@@ -235,16 +211,16 @@ hpoa_reasoning_agent = Agent(
     tools=[
         # local DB
         Tool(filter_hpoa),
-        Tool(search_hp),
+        Tool(batch_search_hp),
         Tool(categorize_hpo),
         Tool(categorize_mondo),
-        Tool(search_mondo),
+        Tool(batch_search_mondo),
 
-        # APIs
-        Tool(ToolLimiter(get_omim_terms, max_calls=5).wrap()),
-        Tool(ToolLimiter(get_omim_clinical, max_calls=5).wrap()),
-        Tool(ToolLimiter(lookup_pmid_text, max_calls=5).wrap()),
-        Tool(ToolLimiter(pubmed_search_pmids, max_calls=5).wrap()),
+        # APIs limited to 5 calls each
+        Tool(LimitedTool(get_omim_terms, max_calls=5).wrap()),
+        Tool(LimitedTool(get_omim_clinical, max_calls=5).wrap()),
+        Tool(LimitedTool(lookup_pmid_text, max_calls=5).wrap()),
+        Tool(LimitedTool(pubmed_search_pmids, max_calls=5).wrap()),
     ],
 )
 
@@ -257,16 +233,16 @@ hpoa_agent = Agent(
     tools=[
         # local DB
         Tool(filter_hpoa),
-        Tool(search_hp),
+        Tool(batch_search_hp),
         Tool(categorize_hpo),
         Tool(categorize_mondo),
-        Tool(search_mondo),
+        Tool(batch_search_mondo),
 
-        # APIs
-        Tool(ToolLimiter(get_omim_terms, max_calls=5).wrap()),
-        Tool(ToolLimiter(get_omim_clinical, max_calls=5).wrap()),
-        Tool(ToolLimiter(lookup_pmid_text, max_calls=5).wrap()),
-        Tool(ToolLimiter(pubmed_search_pmids, max_calls=5).wrap()),
+        # APIs limited to 5 calls each
+        Tool(LimitedTool(get_omim_terms, max_calls=5).wrap()),
+        Tool(LimitedTool(get_omim_clinical, max_calls=5).wrap()),
+        Tool(LimitedTool(lookup_pmid_text, max_calls=5).wrap()),
+        Tool(LimitedTool(pubmed_search_pmids, max_calls=5).wrap()),
     ],
 )
 
@@ -277,9 +253,9 @@ hpoa_simple_agent = Agent(
     system_prompt=HPOA_SIMPLE_SYSTEM_PROMPT,
     history_processors=[keep_recent_messages],
     tools=[
-        Tool(search_hp),
+        Tool(batch_search_hp),
         Tool(categorize_hpo),
-        Tool(search_mondo),
+        Tool(batch_search_mondo),
         Tool(categorize_mondo),
         Tool(children_of),
         Tool(parents_of),
@@ -287,22 +263,21 @@ hpoa_simple_agent = Agent(
 )
 
 # retry to avoid transient API errors
-@retry(wait=wait_random_exponential(min=0, max=15),
-       stop=(stop_after_attempt(3) | stop_after_delay(180)),
-       retry=(retry_if_exception_type(ModelHTTPError) | retry_if_exception_type(OpenAIError)),
-       reraise=True)
-def call_agent_with_retry(
+async def call_agent_with_retry(
     input: str,
     agent: Agent = hpoa_agent,
     model: Optional[str] = None,
-    tool_limit: int = 100,
-    use_history: bool = True,
+    tool_limit: int = 25,
+    use_history: bool = HPOA_HISTORY,
     deps: Optional[HPOADependencies] = None,
     usage_limits: Optional[UsageLimits] = None,
     message_history: Optional[list[ModelMessage]] = None,
 ):
+    """Async call with retry logic (lighter + faster)."""
+
     if model:
         agent.model = model
+
     history = None
     if use_history:
         load_history()
@@ -313,31 +288,42 @@ def call_agent_with_retry(
     deps = deps or get_config()
     usage_limits = usage_limits or UsageLimits(request_limit=tool_limit)
 
-    result = agent.run_sync(
-        input,
-        deps=deps,
-        usage_limits=usage_limits,
-        message_history=history,
-    )
+    async for attempt in AsyncRetrying(
+        wait=wait_random_exponential(min=0.5, max=3),
+        stop=stop_after_attempt(2),                     
+        retry=(retry_if_exception_type(ModelHTTPError) | retry_if_exception_type(OpenAIError)),
+        reraise=True,
+    ):
+        with attempt:
+            result = await agent.run(
+                input,
+                deps=deps,
+                usage_limits=usage_limits,
+                message_history=history,
+            )
 
-    if use_history:
-        MSG_HISTORY.extend(result.new_messages())
-        save_history()
-    return result
+            if use_history:
+                MSG_HISTORY.extend(result.new_messages())
+                save_history()
+
+            return result
 
 # without retry
-def call_agent(
+async def call_agent(
     input: str,
     agent: Agent = hpoa_agent,
     model: Optional[str] = None,
-    tool_limit: int = 100,
-    use_history: bool = True,
+    tool_limit: int = 25,
+    use_history: bool = HPOA_HISTORY,
     deps: Optional[HPOADependencies] = None,
     usage_limits: Optional[UsageLimits] = None,
     message_history: Optional[list[ModelMessage]] = None,
 ):
+    """Async call without retries (lighter + faster)."""
+
     if model:
         agent.model = model
+
     history = None
     if use_history:
         load_history()
@@ -348,13 +334,19 @@ def call_agent(
     deps = deps or get_config()
     usage_limits = usage_limits or UsageLimits(request_limit=tool_limit)
 
-    result = agent.run_sync(
+    result = await agent.run(
         input,
         deps=deps,
         usage_limits=usage_limits,
         message_history=history,
     )
+
     if use_history:
         MSG_HISTORY.extend(result.new_messages())
         save_history()
+
     return result
+
+def call_agent_sync(*args, **kwargs):
+    """Synchronous wrapper for call_agent_with_retry."""
+    return agent_run_sync(call_agent_with_retry(*args, **kwargs))

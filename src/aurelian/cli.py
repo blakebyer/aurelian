@@ -734,7 +734,7 @@ def hpoa(ui, query, **kwargs):
     Supports disease -> phenotype lookups (OMIM/MONDO/label/PMID), 
     phenotype concept queries (HP:ID/label), and curation mode (e.g. "Suggest phenotype annotations for Coffin-Lowry syndrome").
     """
-    run_agent("hpoa", "aurelian.agents.hpoa", query=query, ui=ui, agent_func_name="call_agent_with_retry", **kwargs)
+    run_agent("hpoa", "aurelian.agents.hpoa", query=query, ui=ui, agent_func_name="call_agent_sync", **kwargs)
 
 
 @main.command()

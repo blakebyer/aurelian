@@ -15,12 +15,14 @@ NCBI_API_KEY = os.environ.get("NCBI_API_KEY")
 
 doi_fetcher = DOIFetcher()
 
+
 def _add_api_key(params: dict) -> dict:
     """If NCBI_API_KEY is set, inject it into the request parameters."""
     if NCBI_API_KEY:
         params = dict(params)  # copy to avoid mutating caller
         params["api_key"] = NCBI_API_KEY
     return params
+
 
 def extract_doi_from_url(url: str) -> Optional[str]:
     """Extracts the DOI from a given journal URL.
@@ -46,7 +48,7 @@ def doi_to_pmid(doi: str) -> Optional[str]:
         str: The corresponding PMID if found, otherwise an empty string.
 
     """
-    API_URL = f"https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+    API_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
     params = {"ids": doi, "format": "json"}
     response = requests.get(API_URL, params=_add_api_key(params))
     response.raise_for_status()
@@ -84,7 +86,7 @@ def get_doi_text(doi: str) -> str:
 
 
 def get_pmid_from_pmcid(pmcid):
-    """Fetch the PMID from a PMC ID using the Entrez E-utilities `esummary`.
+    """Fetch the PMID from a PMC ID using the Entrez E-utilities esummary.
 
     Example:
         >>> pmcid = "PMC5048378"
@@ -102,7 +104,6 @@ def get_pmid_from_pmcid(pmcid):
         pmcid = pmcid.split(":")[1]
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
     params = {"db": "pmc", "id": pmcid.replace("PMC", ""), "retmode": "json"}  # Remove "PMC" prefix if included
-
     response = requests.get(url, params=_add_api_key(params))
     response.raise_for_status()
     data = response.json()
@@ -118,7 +119,7 @@ def get_pmid_from_pmcid(pmcid):
         print(f"PMID not found for PMCID {pmcid}")
     except Exception as e:
         print(f"Error fetching PMID for PMCID {pmcid}: {e}")
-    return None # key fix, if there is no match, return None
+    return None  # key fix, if there is no match, return None
 
 
 def get_pmcid_text(pmcid: str) -> str:
@@ -138,7 +139,7 @@ def get_pmcid_text(pmcid: str) -> str:
     pmid = get_pmid_from_pmcid(pmcid)
     if not pmid:
         return f"PMID not found for {pmcid}"
-    return get_pmid_text(pmid)
+    return get_pmid_text(pmcid)
 
 
 def get_pmid_text(pmid: str) -> str:
@@ -171,10 +172,12 @@ def get_pmid_text(pmid: str) -> str:
         text = get_abstract_from_pubmed(pmid)
     return text
 
+
 def pmid_to_doi(pmid: str) -> Optional[str]:
+    """Fetch DOI from a PMID using PubMed esummary."""
     if ":" in pmid:
         pmid = pmid.split(":")[1]
-    url = f"https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
+    url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
     params = {"db": "pubmed", "id": pmid, "retmode": "json"}
     response = requests.get(url, params=_add_api_key(params))
     response.raise_for_status()
@@ -210,7 +213,6 @@ def get_full_text_from_bioc(pmid: str) -> str:
 
     """
     response = requests.get(BIOC_URL.format(pmid=pmid))
-
     if response.status_code != 200:
         return ""  # Return empty string if request fails
 
@@ -224,7 +226,7 @@ def get_full_text_from_bioc(pmid: str) -> str:
 
 
 def get_abstract_from_pubmed(pmid: str) -> str:
-    """Fetch the title and abstract of an article from PubMed using Entrez E-utilities `efetch`.
+    """Fetch the title and abstract of an article from PubMed using Entrez E-utilities efetch.
 
     Example:
         >>> pmid = "31653696"
@@ -240,7 +242,6 @@ def get_abstract_from_pubmed(pmid: str) -> str:
     """
     params = {"db": "pubmed", "id": pmid, "retmode": "xml"}
     response = requests.get(EFETCH_URL.format(pmid=pmid), params=_add_api_key(params))
-
     if response.status_code != 200:
         return ""
 

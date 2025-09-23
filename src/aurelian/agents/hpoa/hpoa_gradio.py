@@ -1,9 +1,10 @@
 """Gradio interface for the HPOA agent (simple)."""
-from typing import List, Optional
+from typing import List, Optional, Any
 import os
 import json
 import gradio as gr
-from .hpoa_agent import call_agent_with_retry
+from .hpoa_agent import call_agent_with_retry, call_agent
+from aurelian.utils.async_utils import run_sync as agent_run_sync
 from .hpoa_config import HPOADependencies
 
 
@@ -50,7 +51,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
 
         return str(data)
     
-    def get_info(query: str, history: List[str]) -> str:
+    def get_info(query: str, history: List[Any]) -> str:
         # Debug prints
         print(f"QUERY = {query}")
         print("HISTORY =", json.dumps(history, indent=2, ensure_ascii=False))
@@ -68,7 +69,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
 
         try:
             # Call the agent with retries
-            result = call_agent_with_retry(query)
+            result = agent_run_sync(call_agent_with_retry(query))
             return format_agent_result(result)
 
         except Exception as e:
@@ -86,14 +87,14 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
                 "</div>",
         chatbot=gr.Chatbot(type="messages", show_copy_button=True, render_markdown=True),
         examples=[
-            ["Tell me what you know about MONDO:0011518"],
+            ["Tell me what you know about MONDO:0011518 (Wiedemann-Steiner syndrome)"],
             ["What body system is HP:0009939 (mandibular aplasia)?"],
             ["Which phenotypes for Charcot-Marie tooth disease affect females?"],
-            ["List the top 10 phenotypes by frequency for Digeorge syndrome"],
+            ["List all the phenotypes for Digeorge syndrome"],
             ["Return the OMIM Clinical Synopsis for Cystic fibrosis"],
             ["Suggest removal of phenotype annotations with poor evidence for ORPHA:580"],
             ["Propose new annotations for Fabry disease based on PMID:21092187"],
-            ["Which phenotypes for MPS III listed in PMID:32201668 are contained in HPOA?"],
+            ["Compare phenotypes for Down syndrome in HPOA to those in PMID:34440331"],
         ]
     )
 

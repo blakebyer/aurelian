@@ -99,7 +99,9 @@ Aurelian provides the following MCP servers:
 | uniprot       | Agent         | UniProt protein information                        |
 | diagnosis     | Agent         | Disease diagnosis with Monarch Knowledge Graph     |
 | talisman      | Agent         | Gene set enrichment and gene analysis              |
+| hpoa          | Agent         | Human Phenotype Ontology annotation and curation   |
 | memory        | Utility       | Persistent memory for MCP interactions             |
+
 
 ### Configuration Parameters
 
