@@ -2,10 +2,10 @@
 
 import logging
 import os
-import inspect
-from typing import Any, Awaitable, Callable, Optional, List, Tuple
 import warnings
 from pathlib import Path
+from typing import Any, Awaitable, Callable, Optional, List, Tuple
+
 from aurelian.utils.async_utils import run_sync
 import click
 from pydantic_ai.models.openai import OpenAIModel
@@ -150,29 +150,28 @@ def split_options(kwargs, agent_keys: Optional[List]=None, extra_agent_keys: Opt
 
 
 def run_agent(
-    agent_name: str, 
-    agent_module: str, 
-    query: Optional[tuple] = None, 
+    agent_name: str,
+    agent_module: str,
+    query: Optional[tuple] = None,
     ui: bool = False,
     specialist_agent_name: Optional[str] = None,
     agent_func_name: str = "run_sync",
     join_char: str = " ",
     use_cborg: bool = False,
+    extra_agent_keys: Optional[List[str]] = None,
     **kwargs
 ) -> None:
     """Run an agent in either UI or direct query mode.
-    
+
     Args:
         agent_name: Agent's name for import paths
         agent_module: Fully qualified module path to the agent
         query: Text query for direct mode
         ui: Whether to force UI mode
         specialist_agent_name: Name of the agent class to run
-        agent_func_name: Name of the callable used for direct mode. The
-            resolver checks the agent instance first, then the module to
-            support helpers like `call_agent_with_retry`.
+        agent_func_name: Name of the function to run the agent
         join_char: Character to join multi-part queries with
-        use_cborg: Whether to use the CBORG proxy for the model
+        extra_agent_keys: Option names that should be forwarded to the agent call
         kwargs: Additional arguments for the agent
     """
     # DEPRECATED: use the new agent command instead
@@ -185,14 +184,14 @@ def run_agent(
     gradio_module = __import__(f"{agent_module}.{agent_name}_gradio", fromlist=["chat"])
     agent_class = __import__(f"{agent_module}.{agent_name}_agent", fromlist=[f"{specialist_agent_name}_agent"])
     config_module = __import__(f"{agent_module}.{agent_name}_config", fromlist=["get_config"])
-    
+
     chat_func = gradio_module.chat
     agent = getattr(agent_class, f"{specialist_agent_name}_agent")
     get_config = config_module.get_config
-    
+
     # Process agent and UI options
     agent_keys = ["model", "use_cborg", "workdir", "ontologies", "db_path", "collection_name"]
-    agent_options, launch_options = split_options(kwargs, agent_keys=agent_keys)
+    agent_options, launch_options = split_options(kwargs, agent_keys=agent_keys, extra_agent_keys=extra_agent_keys)
 
     deps = get_config()
 
@@ -215,31 +214,20 @@ def run_agent(
         print(f"CBORG model: {model}")
         agent_run_options["model"] = model
 
+    # Determine callable for direct-mode execution
+    agent_run_func = getattr(agent, agent_func_name, None)
+    agent_call_kwargs = agent_run_options
+    if agent_run_func is None:
+        agent_run_func = getattr(agent_class, agent_func_name)
+        agent_call_kwargs = dict(agent_run_options)
+        agent_call_kwargs.setdefault("agent", agent)
+
     # Run in appropriate mode
     if not ui and query:
         # Direct query mode
-        
-        # Resolve the callable, preferring the agent instance and
-        # falling back to module-level helpers if present.
-        if hasattr(agent, agent_func_name):
-            agent_run_func = getattr(agent, agent_func_name)
-        elif hasattr(agent_class, agent_func_name):
-            agent_run_func = getattr(agent_class, agent_func_name)
-        else:
-            raise AttributeError(
-                f"{agent_name} agent has no callable '{agent_func_name}'"
-            )
-
-        call_kwargs = dict(agent_run_options)
-        if 'deps' not in call_kwargs:
-            call_kwargs['deps'] = deps
-
-        sig = inspect.signature(agent_run_func)
-        if 'agent' in sig.parameters and 'agent' not in call_kwargs:
-            call_kwargs['agent'] = agent
 
         # Run the agent and print results
-        r = agent_run_func(join_char.join(query), **call_kwargs)
+        r = agent_run_func(join_char.join(query), deps=deps, **agent_call_kwargs)
         print(r.output)
         mjb = r.all_messages_json()
         # decode messages from json bytes to dict:
@@ -264,7 +252,7 @@ def run_agent(
 @share_option
 @server_port_option
 @workdir_option
-@ui_option  
+@ui_option
 @run_evals_option
 @eval_filter_option
 @eval_limit_option
@@ -334,12 +322,22 @@ def agent(ui, query, agent, use_cborg=False, run_evals=False, eval_filter=None, 
         # TODO: make this generic
         package_name = f"{agent_module}.{agent}_evals"
         module = importlib.import_module(package_name)
-        dataset = module.create_eval_dataset()
+        
+        # Prepare evaluation filtering options
+        eval_options = {}
+        if eval_filter:
+            eval_options['difficulty'] = eval_filter.split(',') if ',' in eval_filter else [eval_filter]
+        if eval_limit:
+            eval_options['limit'] = eval_limit
+        if eval_benchmark:
+            eval_options['benchmark'] = eval_benchmark
+            
+        dataset = module.create_eval_dataset(**eval_options)
 
         async def run_agent(inputs: str) -> Any:
             result = await agent_obj.run(inputs, deps=deps, **agent_run_options)
             return result.output
-        
+
         eval_func: Callable[[str], Awaitable[str]] = run_agent
         report = dataset.evaluate_sync(eval_func)
         report.print(include_input=True, include_output=True)
@@ -726,24 +724,6 @@ def ubergraph(ui, query, **kwargs):
 @server_port_option
 @ui_option
 @click.argument("query", nargs=-1, required=False)
-def hpoa(ui, query, **kwargs):
-    """Run the HPOA Agent for Human Phenotype Ontology annotations.
-
-    Usage: Direct query: aurelian hpoa "What phenotypes are associated with Fabry disease?" Interactive chat: aurelian hpoa --ui
-
-    Supports disease -> phenotype lookups (OMIM/MONDO/label/PMID), 
-    phenotype concept queries (HP:ID/label), and curation mode (e.g. "Suggest phenotype annotations for Coffin-Lowry syndrome").
-    """
-    run_agent("hpoa", "aurelian.agents.hpoa", query=query, ui=ui, agent_func_name="call_agent_sync", **kwargs)
-
-
-@main.command()
-@model_option
-@workdir_option
-@share_option
-@server_port_option
-@ui_option
-@click.argument("query", nargs=-1, required=False)
 def gene(ui, query, **kwargs):
     """Start the Gene Agent for retrieving gene descriptions.
 
@@ -774,6 +754,73 @@ def goann(ui, query, **kwargs):
     Run with a query for direct mode or with --ui for interactive chat mode.
     """
     run_agent("goann", "aurelian.agents.goann", query=query, ui=ui, **kwargs)
+
+@main.command()
+@model_option
+@workdir_option
+@share_option
+@server_port_option
+@ui_option
+@click.option(
+    "--retry/--no-retry",
+    'use_retry',
+    default=True,
+    show_default=True,
+    help="Retry the agent once on transient errors before failing.",
+)
+@click.option(
+    "--history/--no-history",
+    "-h/-nh",
+    "use_history",
+    default=None,
+    show_default=False,
+    help="Override the HPOA_HISTORY setting for this run (1 = history, 0 = fresh).",
+)
+@click.option(
+    "--agent",
+    "agent_variant",
+    type=click.Choice(["standard", "simple", "reasoning"], case_sensitive=False),
+    default="standard",
+    show_default=True,
+    help="Select the HPOA agent variant (standard, simple, or reasoning).",
+)
+@click.option(
+    "--output",
+    "-o",
+    "output_path",
+    type=click.Path(path_type=Path),
+    help="Write the agent's structured output to the given JSON file.",
+)
+@click.argument("query", nargs=-1, required=False)
+def hpoa(ui, query, use_retry, use_history, agent_variant, output_path, **kwargs):
+    """Run the HPOA Agent for Human Phenotype Ontology annotations.
+
+    Usage: Direct query: aurelian hpoa "What phenotypes are associated with Fabry disease?" Interactive chat: aurelian hpoa --ui
+
+    Supports disease -> phenotype lookups (OMIM/MONDO/label/PMID), 
+    phenotype concept queries (HP:ID/label), and curation mode (e.g. "Suggest phenotype annotations for Coffin-Lowry syndrome").
+    """
+    if ui and output_path:
+        raise click.UsageError("--output is only supported in direct query mode.")
+
+    if use_history is not None:
+        os.environ["HPOA_HISTORY"] = "1" if use_history else "0"
+
+    normalized_variant = (agent_variant or "standard").lower()
+
+    run_agent(
+        "hpoa",
+        "aurelian.agents.hpoa",
+        agent_func_name="call_agent_sync",
+        query=query,
+        ui=ui,
+        extra_agent_keys=["use_retry", "use_history", "agent_variant", "output_path"],
+        use_retry=use_retry,
+        use_history=use_history,
+        agent_variant=normalized_variant,
+        output_path=output_path,
+        **kwargs,
+    )
 
 
 @main.command()

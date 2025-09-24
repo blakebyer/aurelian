@@ -21,6 +21,13 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
     if deps is None:
         deps = HPOADependencies()
 
+    use_retry = kwargs.pop("use_retry", True)
+    use_history = kwargs.pop("use_history", None)
+    output_path = kwargs.pop("output_path", None)
+    if output_path:
+        print("--output is ignored in UI mode; results are shown in the interface.")
+    agent_kwargs = dict(kwargs)
+
     def format_agent_result(result):
         data = result.output
 
@@ -53,7 +60,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
     async def get_info(query: str, history: List[Any]) -> str:
         # Debug prints
         print(f"QUERY = {query}")
-        print("HISTORY =", json.dumps(history, indent=2, ensure_ascii=False))
+        print("HISTORY =", json.dumps(history, indent=2, ensure_ascii=False) if isinstance(history, list) else str(history))
 
         # Check for required key before running
         openai_key = os.environ.get("OPENAI_API_KEY")
@@ -67,8 +74,12 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
             )
 
         try:
-            # Call the agent with retries
-            result = await call_agent_with_retry(query)
+            runner = call_agent_with_retry if use_retry else call_agent
+            run_kwargs = dict(agent_kwargs)
+            if use_history is not None:
+                run_kwargs.setdefault("use_history", use_history)
+
+            result = await runner(query, **run_kwargs)
             return format_agent_result(result)
 
         except Exception as e:
