@@ -27,6 +27,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
     if output_path:
         print("--output is ignored in UI mode; results are shown in the interface.")
     agent_kwargs = dict(kwargs)
+    agent_variant = agent_kwargs.get("agent_variant", "standard")
 
     def format_agent_result(result):
         data = result.output
@@ -57,10 +58,10 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
 
         return str(data)
     
-    async def get_info(query: str, history: List[Any]) -> str:
+    async def get_info(query: str, history: List[str]) -> str:
         # Debug prints
         print(f"QUERY = {query}")
-        print("HISTORY =", json.dumps(history, indent=2, ensure_ascii=False) if isinstance(history, list) else str(history))
+        print(f"HISTORY = {history}")
 
         # Check for required key before running
         openai_key = os.environ.get("OPENAI_API_KEY")
@@ -88,6 +89,22 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
                 return f"Error: rate limit exceeded. Details: {msg}"
             return f"Error calling agent: {msg}"
 
+    variant_key = (agent_variant or "standard").lower()
+    if variant_key == "simple":
+        example_queries = [
+            ["What body system is HP:0009939 (mandibular aplasia)?"],
+            ["List the children of HP:0001250"],
+            ["Show the parents of HP:0000407"],
+            ["Give the MONDO label and definition for MONDO:0020066"],
+        ]
+    else:
+        example_queries = [
+            ["Tell me what you know about MONDO:0011518 (Wiedemann-Steiner syndrome)"],
+            ["Suggest removal of phenotype annotations with poor evidence for ORPHA:580"],
+            ["Propose new annotations for Fabry disease based on PMID:21092187"],
+            ["Compare phenotypes for Down syndrome in HPOA to those in PMID:34440331"],
+        ]
+
     return gr.ChatInterface(
         fn=get_info,
         type="messages",
@@ -96,16 +113,7 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
                 "An AI assistant for querying and curating Human Phenotype Ontology Annotations (HPOA)"
                 "</div>",
         chatbot=gr.Chatbot(type="messages", show_copy_button=True, render_markdown=True),
-        examples=[
-            ["Tell me what you know about MONDO:0011518 (Wiedemann-Steiner syndrome)"],
-            ["What body system is HP:0009939 (mandibular aplasia)?"],
-            ["Which phenotypes for Charcot-Marie tooth disease affect females?"],
-            ["List all the phenotypes for Digeorge syndrome"],
-            ["Return the OMIM Clinical Synopsis for Cystic fibrosis"],
-            ["Suggest removal of phenotype annotations with poor evidence for ORPHA:580"],
-            ["Propose new annotations for Fabry disease based on PMID:21092187"],
-            ["Compare phenotypes for Down syndrome in HPOA to those in PMID:34440331"],
-        ]
+        examples=example_queries
     )
 
 

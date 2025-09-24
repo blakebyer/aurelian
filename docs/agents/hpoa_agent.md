@@ -138,13 +138,13 @@ Example (truncated):
   ```
 - **Toggle history caching**
   ```bash
-  aurelian hpoa --history "Summarize phenotypes for Gaucher disease"
+  aurelian hpoa --history "Summarize phenotypes for polycystic kidney disease"
   aurelian hpoa --no-history "What is the genetic basis for hemophilia?"
   ```
 - **Pick a variant**
   ```bash
   aurelian hpoa --agent simple "What organ system does HP:0001297 belong to?"
-  aurelian hpoa --agent reasoning --model gpt-5 "Explain the difference between OMIM and ORPHA Fabry disease annotations"
+  aurelian hpoa --agent reasoning --model gpt-5 "Explain the difference between OMIM and ORPHA CHIME syndrome phenotype annotations"
   ```
 - **Save the structured output**
   ```bash
@@ -154,7 +154,7 @@ Example (truncated):
 ### Sample Playbook
 1. Audit existing annotations (standard):
    ```bash
-   aurelian hpoa --agent standard --model gpt-5 "Review Fabry disease annotations for outdated evidence"
+   aurelian hpoa --agent standard --model gpt-5 "Review Gaucher disease annotations for outdated evidence"
    ```
 2. Quick ontology lookup (simple):
    ```bash
@@ -176,7 +176,7 @@ Example (truncated):
 - "Filter HPOA by PMID:7795640 and summarize the annotations"
 - "Suggest removal of low-evidence phenotypes for ORPHA:580"
 - "Provide the OMIM clinical synopsis for Cystic fibrosis"
-- "Which body system is HP:0001297 (stroke) assigned to?"
+- "Which body system is HP:0001297 (Stroke) assigned to?"
 
 ---
 
@@ -188,7 +188,7 @@ Example (truncated):
 - `NCBI_API_KEY` (recommended to avoid PubMed rate limits)
 - `HPOA_TSV`: optional explicit path to `phenotype.hpoa`
 - `HPOA_DB`: optional location for the SQLite cache (`hpoa.db`)
-- `HPOA_HISTORY`: `1` (default) saves session transcripts to `hpoa_history/`; `0` disables persistence. The CLI `--history/--no-history` flags override this per run.
+- `HPOA_HISTORY`: `1` (default) saves session transcripts to `hpoa_history/`; `0` disables persistence. The agent uses the previous three messages as context. The CLI `--history/--no-history` flags override this per run.
 
 ### How the Database Path Is Chosen
 1. If you instantiate `HPOADependencies(hpoa_db_path=...)`, that path wins.
