@@ -112,7 +112,6 @@ class HPOADependencies(HasWorkdir):
         if MONDO_ADAPTER_SINGLETON is None:
             MONDO_ADAPTER_SINGLETON = get_adapter("sqlite:obo:mondo")
         return MONDO_ADAPTER_SINGLETON
-        #return get_adapter("ontobee:mondo")
     
     def get_hp_adapter(self) -> BasicOntologyInterface:
         """Get a configured HPO adapter."""
@@ -121,7 +120,6 @@ class HPOADependencies(HasWorkdir):
         if HP_ADAPTER_SINGLETON is None:
             HP_ADAPTER_SINGLETON = get_adapter("sqlite:obo:hp")
         return HP_ADAPTER_SINGLETON
-        #return get_adapter("ontobee:hp")
     
     async def fetch_and_parse_hpoa(self, path: Optional[str] = None) -> List[Dict[str, str]]:
         """
