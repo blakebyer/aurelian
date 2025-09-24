@@ -188,7 +188,7 @@ Example (truncated):
 - `NCBI_API_KEY` (recommended to avoid PubMed rate limits)
 - `HPOA_TSV`: optional explicit path to `phenotype.hpoa`
 - `HPOA_DB`: optional location for the SQLite cache (`hpoa.db`)
-- `HPOA_HISTORY`: `1` (default) saves session transcripts to `hpoa_history/`; `0` disables persistence. The agent uses the previous three messages as context. The CLI `--history/--no-history` flags override this per run.
+- `HPOA_HISTORY`: `1` (default) saves session transcripts to `hpoa_history/`; `0` disables persistence. If set, the agent uses the previous three messages as context. The CLI `--history/--no-history` flags override this per run.
 
 ### How the Database Path Is Chosen
 1. If you instantiate `HPOADependencies(hpoa_db_path=...)`, that path wins.
