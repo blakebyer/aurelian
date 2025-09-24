@@ -99,11 +99,11 @@ class HPOADependencies(HasWorkdir):
         # set hpoa db path
         if self.hpoa_db_path is None:
             save_path = os.environ.get("HPOA_DB")
-        if save_path:
-            self.hpoa_db_path = save_path
-        else:
-            base = os.environ.get("AURELIAN_WORKDIR") or os.getcwd()
-            self.hpoa_db_path = os.path.join(base, "hpoa.db")
+            if save_path:
+                self.hpoa_db_path = save_path
+            else:
+                base = os.environ.get("AURELIAN_WORKDIR") or os.getcwd()
+                self.hpoa_db_path = os.path.join(base, "hpoa.db")
 
     def get_mondo_adapter(self) -> BasicOntologyInterface:
         """Get a configured Mondo adapter."""
@@ -133,6 +133,7 @@ class HPOADependencies(HasWorkdir):
         - Else download the latest `phenotype.hpoa` from GitHub and save it to the current working directory.
         """
         # 0) env var override
+        env_path = None
         if not path:
             env_path = os.environ.get("HPOA_TSV")
         if env_path and os.path.exists(env_path):

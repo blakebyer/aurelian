@@ -3,6 +3,7 @@ Basic eval tests for the HPOA agent/tools.
 Run with: poetry run pytest -q src/aurelian/agents/hpoa/hpoa_evals.py
 """
 from pathlib import Path
+import os
 import pytest
 from pydantic_ai import RunContext
 
@@ -37,7 +38,10 @@ def _ctx() -> RunContext[HPOADependencies]:
     return RunContext[HPOADependencies](deps=deps, model=None, usage=None, prompt=None)
 
 def _ctx_with_fixture(fp: Path) -> RunContext[HPOADependencies]:
-    deps = HPOADependencies()
+    db_path = fp.parent / 'hpoa-test.db'
+    os.environ['HPOA_TSV'] = str(fp)
+    os.environ['HPOA_DB'] = str(db_path)
+    deps = HPOADependencies(hpoa_db_path=str(db_path))
     return RunContext[HPOADependencies](deps=deps, model=None, usage=None, prompt=None)
 
 
@@ -58,11 +62,11 @@ async def test_filter_hpoa_by_name_and_id(tmp_path: Path):
     fp = write_hpoa_fixture(tmp_path)
     rc = _ctx_with_fixture(fp)
 
-    res1 = await tools.filter_hpoa(rc, "foo")
+    res1 = await tools.filter_hpoa_by_disease(rc, "foo")
     assert len(res1) == 2
     assert all(r.disease_name == "Foo syndrome" for r in res1)
 
-    res2 = await tools.filter_hpoa(rc, "MONDO:0000001")
+    res2 = await tools.filter_hpoa_by_disease(rc, "MONDO:0000001")
     assert len(res2) == 1
     assert res2[0].database_id == "MONDO:0000001"
 
