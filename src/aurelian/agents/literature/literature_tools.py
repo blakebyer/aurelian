@@ -14,7 +14,7 @@ from aurelian.utils.pubmed_utils import (
     doi_to_pmid,
     get_abstract_from_pubmed,
 )
-from aurelian.utils.pdf_fetcher import extract_text_from_pdf
+from aurelian.utils.pdf_fetcher import extract_text_from_pdf_url
 
 import re
 from aurelian.utils.search_utils import web_search, retrieve_web_page
@@ -123,26 +123,22 @@ async def get_article_abstract(pmid: str) -> str:
         raise ModelRetry(f"Error retrieving abstract for PMID {pmid}: {str(e)}")
 
 
-async def extract_text_from_pdf_url(ctx: RunContext[LiteratureDependencies], pdf_url: str) -> str:
+async def extract_text_from_pdf(pdf_url: str) -> str:
     """
     Extract text from a PDF at the given URL.
-    
+
     Args:
-        ctx: The run context
+        ctx: Execution context providing shared HTTP client reuse.
         pdf_url: URL to the PDF file
-        
+
     Returns:
         str: The extracted text content
     """
     print(f"EXTRACT PDF: {pdf_url}")
     try:
-        result = extract_text_from_pdf(pdf_url)
-        if not result or "Error" in result:
-            raise ModelRetry(f"Could not extract text from PDF at {pdf_url}. The URL may be invalid or the PDF may be password-protected.")
-        return result
-    except Exception as e:
-        raise ModelRetry(f"Error extracting text from PDF {pdf_url}: {str(e)}")
-
+        return extract_text_from_pdf_url(pdf_url)
+    except Exception as exc:
+        raise ModelRetry(f"Error retrieving PDF from URL: {pdf_url}: {exc}")
 
 async def search_literature_web(query: str) -> str:
     """
@@ -208,7 +204,6 @@ async def retrieve_literature_page(url: str) -> str:
     Returns:
         str: The contents of the webpage
     """
-    print(f"FETCH LITERATURE URL: {url}")
     try:
         result = retrieve_web_page(url)
         if not result or len(result.strip()) < 20:

@@ -1,4 +1,4 @@
-"""Gradio interface for the HPOA agent (simple)."""
+"""Gradio interface for the HPOA agent."""
 from typing import List, Optional, Any
 import os
 import json
@@ -89,21 +89,17 @@ def chat(deps: Optional[HPOADependencies] = None, **kwargs):
                 return f"Error: rate limit exceeded. Details: {msg}"
             return f"Error calling agent: {msg}"
 
-    variant_key = (agent_variant or "standard").lower()
-    if variant_key == "simple":
-        example_queries = [
-            ["What body system is HP:0009939 (mandibular aplasia)?"],
-            ["List the children of HP:0001250"],
-            ["Show the parents of HP:0000407"],
-            ["Give the MONDO label and definition for MONDO:0020066"],
-        ]
-    else:
-        example_queries = [
-            ["Tell me what you know about MONDO:0011518 (Wiedemann-Steiner syndrome)"],
-            ["Suggest removal of phenotype annotations with poor evidence for ORPHA:580"],
-            ["Propose new annotations for Fabry disease based on PMID:21092187"],
-            ["Compare phenotypes for Down syndrome in HPOA to those in PMID:34440331"],
-        ]
+
+    example_queries = [
+        ["Show the children of HP:0001250"],
+        ["What disease category is MONDO:0019391?"],
+        ["What organ system does HP:0000407 belong to?"],
+        ["Propose an appropriate definition for MONDO:0017731."],
+        ["Tell me what you know about MONDO:0011518 (Wiedemann-Steiner syndrome)"],
+        ["Suggest removal of phenotype annotations with poor evidence for ORPHA:580"],
+        ["Propose new annotations for Fabry disease based on PMID:21092187"],
+        ["Compare phenotypes for Down syndrome in HPOA to those in PMID:34440331"],
+    ]
 
     return gr.ChatInterface(
         fn=get_info,
@@ -139,3 +135,5 @@ if __name__ == "__main__":
     ui = chat()
     print(f"Launching Gradio on http://{host}:{port}")
     ui.launch(server_name=host, server_port=port, inbrowser=True)
+
+

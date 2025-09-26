@@ -32,40 +32,45 @@ It supports fast single-question lookups as well as longer, tool-assisted curati
 Need to point to custom files or caches? Instantiate `HPOADependencies` directly:
 
 ```python
+from pathlib import Path
 from aurelian.agents.hpoa.hpoa_agent import call_agent
 from aurelian.agents.hpoa.hpoa_config import HPOADependencies
+from aurelian.dependencies.workdir import WorkDir
 from aurelian.utils.async_utils import run_sync
 
+custom_cache = Path.home() / ".aurelian" / "hpoa-demo"
 custom_deps = HPOADependencies(
-    hpoa_db_path="data/hpoa.db",
-    hpoa_tsv="data/phenotype.hpoa",
+    workdir=WorkDir(),
+    cache_dir=str(custom_cache),
 )
 result = run_sync(call_agent("Update annotations for ORPHA:580", deps=custom_deps))
 print(result.output)
 ```
 
+Both the downloaded `phenotype.hpoa` and the derived `hpoa.db` live inside the cache directory, mirroring how oaklib manages its ontology caches.
+
 ---
 
 ## Choose a Mode (`--agent`)
-- `standard` (default): full curation workflow. Uses the entire ontology + curation toolbelt (`filter_hpoa`, `batch_search_hp`, PubMed helpers, etc.) and returns the structured `HPOAResponse` schema. Pick this for day-to-day annotation review.
-- `reasoning`: same tools as `standard`, but the request goes through the high-effort reasoning model and the explanation ends with a **Reasoning summary** section that lists the key decision steps and tool calls. The CLI strips any `openai:` prefix automatically, so `--model openai:gpt-5` and `--model gpt-5` behave the same.
-- `simple`: lightweight ontology concierge. Only ontology navigation tools are available (batch searches, parent/child lookups), no curation helpers, and responses are usually plain text.
+- `standard` (default): full curation workflow with the complete ontology + curation toolbelt (`filter_hpoa`, `batch_search_hp`, `children_of`, `parents_of`, PubMed helpers, etc.) and the structured `HPOAResponse` schema. Pick this for day-to-day annotation review.
+- `reasoning`: same tools as `standard`, but the request goes through the high-effort reasoning model and the explanation ends with a **Reasoning summary** section that lists the key decision steps and tool calls.
+
+Models are fixed per variant (standard uses `openai:gpt-5`, reasoning uses `gpt-5`); there is no CLI override.
 
 If you omit `--agent`, the CLI runs in `standard` mode.
 
 ### Tool Reference
-- **Shared by `standard` and `reasoning`**:
-  - `filter_hpoa`: query the HPOA TSV/SQLite cache by disease, phenotype, PMID, and other columns.
-  - `batch_search_hp`: resolve multiple HPO IDs or labels to canonical terms.
-  - `categorize_hpo`: map a phenotype to high-level organ-system categories.
-  - `batch_search_mondo`: resolve MONDO disease IDs or labels.
-  - `categorize_mondo`: map diseases to higher-level MONDO groupings.
-  - `get_omim_terms`: fetch OMIM records linked to a disease or phenotype.
-  - `get_omim_clinical`: retrieve OMIM clinical synopsis text.
-  - `lookup_pmid_text`: pull PubMed abstracts/full text for evidence review.
-  - `pubmed_search_pmids`: search PubMed and return matching PMIDs for follow-up.
-- **Only in `simple`**:
-  - `batch_search_hp`, `batch_search_mondo`, `categorize_hpo`, `categorize_mondo`, `children_of`, `parents_of` (no curation helpers).
+- `filter_hpoa`: query the HPOA TSV/SQLite cache by disease, phenotype, PMID, and other columns.
+- `batch_search_hp`: resolve multiple HPO IDs or labels to canonical terms.
+- `children_of` / `parents_of`: explore narrower or broader ontology terms within HPO and MONDO.
+- `categorize_hpo`: map a phenotype to high-level organ-system categories.
+- `batch_search_mondo`: resolve MONDO disease IDs or labels.
+- `categorize_mondo`: map diseases to higher-level MONDO groupings.
+- `get_omim_terms`: fetch OMIM records linked to a disease or phenotype.
+- `get_omim_clinical`: retrieve OMIM clinical synopsis text.
+- `lookup_pmid_text`: pull PubMed abstracts/full text for evidence review.
+- `pubmed_search_pmids`: search PubMed and return matching PMIDs for follow-up.
+- `extract_text_from_pdf`: from a supplied PDF URL, scrape text for evidence review.
 
 Running `python -m aurelian.agents.hpoa.hpoa_mcp` exposes these same tools over MCP with identical names.
 
@@ -119,7 +124,6 @@ Example (truncated):
 }
 ```
 
-`simple` returns free text (no `annotations`). If you need structured output, stick with `standard` or `reasoning`.
 
 ---
 
@@ -128,13 +132,18 @@ Example (truncated):
   ```bash
   aurelian hpoa "Summarize phenotypes for Fabry disease"
   ```
-- **Switch models**
+- **Pin a custom cache**
   ```bash
-  aurelian hpoa --model openai:gpt-4o "List HPOA rows for Marfan syndrome"
+  HPOA_CACHE_DIR=~/.aurelian/hpoa-demo 
+  aurelian hpoa "Review Gaucher disease annotations"
   ```
-- **Control retries**
+- **Store history in a specific directory**
   ```bash
-  aurelian hpoa --no-retry "Suggest removal of low-confidence phenotypes for ORPHA:580"
+  aurelian hpoa --history-dir logs/hpoa --history "Summarize phenotypes for Marfan syndrome"
+  ```
+- **Enable retry on failure**
+  ```bash
+  aurelian hpoa --retry "Suggest removal of low-confidence phenotypes for ORPHA:580"
   ```
 - **Toggle history caching**
   ```bash
@@ -143,8 +152,7 @@ Example (truncated):
   ```
 - **Pick a variant**
   ```bash
-  aurelian hpoa --agent simple "What organ system does HP:0001297 belong to?"
-  aurelian hpoa --agent reasoning --model gpt-5 "Explain the difference between OMIM and ORPHA CHIME syndrome phenotype annotations"
+  aurelian hpoa --agent reasoning "Explain the difference between OMIM and ORPHA CHIME syndrome phenotype annotations"
   ```
 - **Save the structured output**
   ```bash
@@ -154,15 +162,15 @@ Example (truncated):
 ### Sample Playbook
 1. Audit existing annotations (standard):
    ```bash
-   aurelian hpoa --agent standard --model gpt-5 "Review Gaucher disease annotations for outdated evidence"
+   aurelian hpoa --agent standard "Review Gaucher disease annotations for outdated evidence"
    ```
-2. Quick ontology lookup (simple):
+2. Quick ontology lookup:
    ```bash
-   aurelian hpoa --agent simple "Parents of HP:0009939"
+   aurelian hpoa "Parents of HP:0009939"
    ```
 3. Deep-dive curation (reasoning):
    ```bash
-   aurelian hpoa --agent reasoning --model gpt-4o --no-retry "Cross-check ORPHA:580 phenotypes against PMID:32201668"
+   aurelian hpoa --agent reasoning --retry "Cross-check ORPHA:580 phenotypes against PMID:32201668"
    ```
 4. Export results:
    ```bash
@@ -177,6 +185,7 @@ Example (truncated):
 - "Suggest removal of low-evidence phenotypes for ORPHA:580"
 - "Provide the OMIM clinical synopsis for Cystic fibrosis"
 - "Which body system is HP:0001297 (Stroke) assigned to?"
+- "Using https://medlineplus.gov/download/genetics/condition/costello-syndrome.pdf, propose adjustments to HPOA for Costello syndrome."
 
 ---
 
@@ -186,16 +195,14 @@ Example (truncated):
 - `OPENAI_API_KEY` (required)
 - `OMIM_API_KEY` (required for OMIM tools)
 - `NCBI_API_KEY` (recommended to avoid PubMed rate limits)
-- `HPOA_TSV`: optional explicit path to `phenotype.hpoa`
-- `HPOA_DB`: optional location for the SQLite cache (`hpoa.db`)
-- `HPOA_HISTORY`: `1` (default) saves session transcripts to `hpoa_history/`; `0` disables persistence. If set, the agent uses the previous three messages as context. The CLI `--history/--no-history` flags override this per run.
+- `AURELIAN_WORKDIR`: optional override for where agents write per-run artifacts (default is a dedicated `workdir/` beside your command).
+- `HPOA_CACHE_DIR`: optional override for the shared cache (defaults to `~/.aurelian/hpoa`).
 
 ### How the Database Path Is Chosen
-1. If you instantiate `HPOADependencies(hpoa_db_path=...)`, that path wins.
-2. Else, `HPOA_DB` is used when set.
-3. Else, a local `phenotype.hpoa` file seeds the database.
-4. Else, the latest release is downloaded.
-5. Default location: `hpoa.db` in the current workdir (or `AURELIAN_WORKDIR`).
+1. If `phenotype.hpoa` or `hpoa.db` exist in the current working directory or inside the configured workdir, they are copied into the shared cache (`HPOA_CACHE_DIR` or the default `~/.aurelian/hpoa`) before the agent runs.
+2. A populated `hpoa.db` in the cache directory is reused immediately.
+3. If the database is missing but `phenotype.hpoa` is available in the cache, it is parsed and the SQLite cache is rebuilt in place.
+4. When neither file exists, the agent downloads the latest `phenotype.hpoa` release into the cache directory and generates `hpoa.db` alongside it.
 
 ---
 

@@ -16,6 +16,7 @@ from click.testing import CliRunner
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from aurelian.cli import main
+from aurelian.agents.hpoa import hpoa_agent
 
 
 @pytest.fixture
@@ -87,7 +88,7 @@ def test_all_agent_commands_help():
             f"Missing mode info in {command} help"
 
 def test_hpoa_direct_query_uses_retry(monkeypatch):
-    """Ensure the HPOA CLI path routes through call_agent_with_retry."""
+    """Ensure the HPOA CLI path routes through call_agent by default."""
     runner = CliRunner()
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
@@ -131,7 +132,7 @@ def test_hpoa_direct_query_uses_retry(monkeypatch):
         def new_messages(self):
             return []
 
-    async def _fake_retry(input, agent=None, deps=None, **kwargs):
+    async def _fake_call(input, agent=None, deps=None, **kwargs):
         calls["input"] = input
         payload = dict(kwargs)
         payload.setdefault("use_history", None)
@@ -141,7 +142,7 @@ def test_hpoa_direct_query_uses_retry(monkeypatch):
         calls["kwargs"] = payload
         return _DummyResult()
 
-    monkeypatch.setattr("aurelian.agents.hpoa.hpoa_agent.call_agent_with_retry", _fake_retry, raising=False)
+    monkeypatch.setattr("aurelian.agents.hpoa.hpoa_agent.call_agent", _fake_call, raising=False)
 
     result = runner.invoke(main, ["hpoa", "test case"])
     assert calls.get("input") == "test case"
@@ -154,7 +155,7 @@ def test_hpoa_direct_query_uses_retry(monkeypatch):
     assert kwargs.get("output_path") is None
 
 
-def test_hpoa_agent_variant_simple(monkeypatch):
+def test_hpoa_agent_variant_reasoning(monkeypatch):
     runner = CliRunner()
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
@@ -170,19 +171,64 @@ def test_hpoa_agent_variant_simple(monkeypatch):
         def new_messages(self):
             return []
 
-    async def _fake_retry(*args, **kwargs):
+    async def _fake_call(*args, **kwargs):
         payload = dict(kwargs)
         payload.setdefault("use_history", None)
         payload.setdefault("agent_variant", None)
         capture["kwargs"] = payload
         return _DummyResult()
 
-    monkeypatch.setattr("aurelian.agents.hpoa.hpoa_agent.call_agent_with_retry", _fake_retry, raising=False)
+    monkeypatch.setattr("aurelian.agents.hpoa.hpoa_agent.call_agent", _fake_call, raising=False)
 
-    result = runner.invoke(main, ["hpoa", "--agent", "simple", "lookup"])
+    result = runner.invoke(main, ["hpoa", "--agent", "reasoning", "lookup"])
     assert result.exit_code == 0
-    assert capture["kwargs"].get("agent_variant") == "simple"
+    assert capture["kwargs"].get("agent_variant") == "reasoning"
 
+
+
+def test_hpoa_retry_flag_uses_retry(monkeypatch):
+    runner = CliRunner()
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    called = {}
+
+    class _DummyResult:
+        def __init__(self):
+            self.output = "ok"
+
+        def all_messages_json(self):
+            return "[]"
+
+        def new_messages(self):
+            return []
+
+    async def _fake_retry(*args, **kwargs):
+        called["used"] = True
+        return _DummyResult()
+
+    async def _should_not_run(*args, **kwargs):
+        raise AssertionError("call_agent should not be used when --retry is set")
+
+    monkeypatch.setattr("aurelian.agents.hpoa.hpoa_agent.call_agent_with_retry", _fake_retry, raising=False)
+    monkeypatch.setattr("aurelian.agents.hpoa.hpoa_agent.call_agent", _should_not_run, raising=False)
+
+    result = runner.invoke(main, ["hpoa", "--retry", "lookup"])
+    assert result.exit_code == 0
+    assert called.get("used") is True
+
+
+def test_hpoa_output_must_be_json(monkeypatch, tmp_path):
+    runner = CliRunner()
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+
+    def _raise(*args, **kwargs):
+        raise ValueError('output path must end with .json')
+
+    monkeypatch.setattr(hpoa_agent, '_write_output_to_file', _raise, raising=True)
+
+    result = runner.invoke(main, ["hpoa", "demo query", "--output", "results/out.txt"])
+    assert result.exit_code != 0
+    assert "must end with .json" in result.output
 
 def test_hpoa_output_option_forwarded(monkeypatch, tmp_path):
     runner = CliRunner()
@@ -200,17 +246,18 @@ def test_hpoa_output_option_forwarded(monkeypatch, tmp_path):
         def new_messages(self):
             return []
 
-    async def _fake_retry(*args, **kwargs):
+    async def _fake_call(*args, **kwargs):
         payload = dict(kwargs)
         payload.setdefault("use_history", None)
         payload.setdefault("agent_variant", None)
         capture["kwargs"] = payload
         return _DummyResult()
 
-    monkeypatch.setattr("aurelian.agents.hpoa.hpoa_agent.call_agent_with_retry", _fake_retry, raising=False)
+    monkeypatch.setattr("aurelian.agents.hpoa.hpoa_agent.call_agent", _fake_call, raising=False)
 
     output_file = tmp_path / "out.json"
     result = runner.invoke(main, ["hpoa", "demo query", "--output", str(output_file)])
     assert result.exit_code == 0
     assert 'output_path' not in capture['kwargs']
     assert output_file.exists()
+

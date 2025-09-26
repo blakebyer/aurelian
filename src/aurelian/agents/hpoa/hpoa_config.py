@@ -1,15 +1,17 @@
 """ Configuration file for HPOA Agent """
-from pydantic import BaseModel, Field, model_validator
+import csv
+import os
+import shutil
+import sqlite3
 from dataclasses import dataclass, field
-import os, csv, sqlite3
-from io import StringIO
-from typing import cast
-import pandas as pd
+from datetime import date
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional, TypedDict
+
 import httpx
-from typing import Optional, List, Dict, Any, TypedDict, Literal
 from oaklib import get_adapter
 from oaklib.interfaces import BasicOntologyInterface
-from datetime import date
+from pydantic import BaseModel, Field, model_validator
 
 from aurelian.dependencies.workdir import HasWorkdir, WorkDir
 
@@ -71,203 +73,153 @@ class HPOAResponse(BaseModel):
 @dataclass
 class HPOADependencies(HasWorkdir):
     """Configuration for the HPOA agent."""
+
     openai_api_key: Optional[str] = None
     omim_api_key: Optional[str] = None
     ncbi_api_key: Optional[str] = None
+    cache_dir: Optional[str] = None
     hpoa_db_path: Optional[str] = None
+    hpoa_tsv_path: Optional[str] = None
     _hp_adapter: Optional[BasicOntologyInterface] = field(default=None, init=False, repr=False)
     _mondo_adapter: Optional[BasicOntologyInterface] = field(default=None, init=False, repr=False)
-    
+
     def __post_init__(self):
         """Initialize the config with default values."""
-        # HasWorkdir doesn't have a __post_init__ method, so we don't call super()
         if self.workdir is None:
             self.workdir = WorkDir()
 
+        cache_root = Path(self.cache_dir).expanduser().resolve() if self.cache_dir else default_cache_root()
+        cache_root.mkdir(parents=True, exist_ok=True)
+        self.cache_dir = str(cache_root)
+        os.environ.setdefault("HPOA_CACHE_DIR", self.cache_dir)
+
+        cache_db = cache_root / "hpoa.db"
+        cache_tsv = cache_root / "phenotype.hpoa"
+
+        search_roots = [Path.cwd().resolve()]
+        if self.workdir and getattr(self.workdir, "location", None):
+            workdir_path = Path(self.workdir.location).expanduser().resolve()
+            if workdir_path not in search_roots:
+                search_roots.append(workdir_path)
+
+        self._cache_existing_asset("phenotype.hpoa", cache_tsv, search_roots)
+        self._cache_existing_asset("hpoa.db", cache_db, search_roots)
+
+        self.hpoa_db_path = str(cache_db)
+        self.hpoa_tsv_path = str(cache_tsv)
+
         if self.openai_api_key is None:
-            import os
             self.openai_api_key = os.environ.get("OPENAI_API_KEY")
-        
+
         if self.omim_api_key is None:
-            import os
             self.omim_api_key = os.environ.get("OMIM_API_KEY")
-        
+
         if self.ncbi_api_key is None:
-            import os
             self.ncbi_api_key = os.environ.get("NCBI_API_KEY")
-        
-        # set hpoa db path
-        if self.hpoa_db_path is None:
-            save_path = os.environ.get("HPOA_DB")
-            if save_path:
-                self.hpoa_db_path = save_path
-            else:
-                base = os.environ.get("AURELIAN_WORKDIR") or os.getcwd()
-                self.hpoa_db_path = os.path.join(base, "hpoa.db")
+
+    def _cache_existing_asset(self, filename: str, destination: Path, search_roots: List[Path]) -> None:
+        for root in search_roots:
+            if root is None:
+                continue
+            candidate = root / filename
+            if candidate.exists():
+                if destination.resolve() == candidate.resolve():
+                    return
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(candidate, destination)
+                return
 
     def get_mondo_adapter(self) -> BasicOntologyInterface:
         """Get a configured Mondo adapter."""
-        # Use module-level singleton to avoid reloading per instance
         global MONDO_ADAPTER_SINGLETON
         if MONDO_ADAPTER_SINGLETON is None:
             MONDO_ADAPTER_SINGLETON = get_adapter("sqlite:obo:mondo")
         return MONDO_ADAPTER_SINGLETON
-    
+
     def get_hp_adapter(self) -> BasicOntologyInterface:
         """Get a configured HPO adapter."""
-        # Use module-level singleton to avoid reloading per instance
         global HP_ADAPTER_SINGLETON
         if HP_ADAPTER_SINGLETON is None:
             HP_ADAPTER_SINGLETON = get_adapter("sqlite:obo:hp")
         return HP_ADAPTER_SINGLETON
-    
+
     async def fetch_and_parse_hpoa(self, path: Optional[str] = None) -> List[Dict[str, str]]:
-        """
-        Load and parse phenotype.hpoa into a list of dicts.
+        """Load phenotype.hpoa into cache and refresh the SQLite database."""
+        source_path: Optional[Path] = None
+        if path:
+            candidate = Path(path).expanduser().resolve()
+            if not candidate.exists():
+                raise FileNotFoundError(f"phenotype.hpoa not found at {candidate}")
+            source_path = candidate
+        elif self.hpoa_tsv_path and os.path.exists(self.hpoa_tsv_path):
+            source_path = Path(self.hpoa_tsv_path)
 
-        Simplified behavior:
-        - If `path` is provided and exists, load it.
-        - Else if `./phenotype.hpoa` exists in the current working directory, load it.
-        - Else download the latest `phenotype.hpoa` from GitHub and save it to the current working directory.
-        """
-        # 0) env var override
-        env_path = None
-        if not path:
-            env_path = os.environ.get("HPOA_TSV")
-        if env_path and os.path.exists(env_path):
-            path = env_path
-        # 1) Explicit path
-        candidate_path = path
-        if candidate_path and os.path.exists(candidate_path):
-            if pd is not None:
-                df = pd.read_csv(candidate_path, sep="\t", comment="#", dtype=str, keep_default_na=False)
-                self._persist_df_to_db(df)
-                return cast(List[Dict[str, str]], df.to_dict("records"))
-            else:
-                rows = _read_hpoa_from_path(candidate_path)
-                self._persist_hpoa_to_db(rows)
-                return rows
-
-        # 2) Local copy in current working directory
-        cwd_path = os.path.join(os.getcwd(), "phenotype.hpoa")
-        if os.path.exists(cwd_path):
-            if pd is not None:
-                df = pd.read_csv(cwd_path, sep="\t", comment="#", dtype=str, keep_default_na=False)
-                self._persist_df_to_db(df)
-                return cast(List[Dict[str, str]], df.to_dict("records"))
-            else:
-                rows = _read_hpoa_from_path(cwd_path)
-                self._persist_hpoa_to_db(rows)
-                return rows
-
-        # 3) Download latest and save to CWD
-        async with httpx.AsyncClient() as client:
-            # Get the latest release metadata
-            r = await client.get("https://api.github.com/repos/obophenotype/human-phenotype-ontology/releases/latest")
-            r.raise_for_status()
-
-            # Find the phenotype.hpoa asset
-            url = next(
-                a["browser_download_url"]
-                for a in r.json().get("assets", [])
-                if "phenotype.hpoa" in a.get("browser_download_url", "")
-            )
-
-            # Download the asset
-            f = await client.get(url)
-            f.raise_for_status()
-            text = await f.atext()
-
-        # Save to CWD as phenotype.hpoa
-        try:
-            with open(cwd_path, "w", encoding="utf-8") as fh:
-                fh.write(text)
-        except Exception:
-            # Non-fatal; continue without saving
-            pass
-
-        lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
-        if pd is not None:
-            import pandas as _pd  # type: ignore
-            df = _pd.read_csv(StringIO(text), sep="\t", comment="#", dtype=str, keep_default_na=False)
-            self._persist_df_to_db(df)
-            return cast(List[Dict[str, str]], df.to_dict("records"))
-        else:
-            reader = csv.DictReader(lines, delimiter="\t")
-            rows = list(reader)
-            self._persist_hpoa_to_db(rows)
+        if source_path:
+            rows = read_hpoa_from_path(str(source_path))
+            if source_path != Path(self.hpoa_tsv_path):
+                shutil.copyfile(str(source_path), self.hpoa_tsv_path)
+            self.persist_hpoa_to_db(rows)
             return rows
 
+        http_client = get_client()
+        release_resp = await http_client.get(
+            "https://api.github.com/repos/obophenotype/human-phenotype-ontology/releases/latest"
+        )
+        release_resp.raise_for_status()
+
+        assets = release_resp.json().get("assets", [])
+        try:
+            asset_url = next(
+                candidate
+                for candidate in (asset.get("browser_download_url") for asset in assets)
+                if candidate and "phenotype.hpoa" in candidate
+            )
+        except StopIteration as exc:
+            raise RuntimeError("phenotype.hpoa asset not found in latest release metadata.") from exc
+
+        download_resp = await http_client.get(asset_url)
+        download_resp.raise_for_status()
+        text = download_resp.text
+
+        with open(self.hpoa_tsv_path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+        rows = parse_hpoa_text(text)
+        self.persist_hpoa_to_db(rows)
+        return rows
+
     async def ensure_hpoa_db(self, path: Optional[str] = None) -> None:
-        """Ensure the SQLite DB is present and populated with HPOA rows.
+        """Ensure the SQLite cache has rows; download or rebuild if needed."""
+        if self.database_has_rows():
+            with sqlite3.connect(self.hpoa_db_path) as con:
+                self.ensure_indexes(con)
+            return
+        await self.fetch_and_parse_hpoa(path=path)
 
-        If the DB file/table is missing or empty, load TSV using fetch_and_parse_hpoa.
-        """
-        if not self.hpoa_db_path:
-            # initialize default
-            base = os.environ.get("AURELIAN_WORKDIR") or os.getcwd()
-            self.hpoa_db_path = os.path.join(base, "hpoa.db")
-
-        need_load = False
-        if not os.path.exists(self.hpoa_db_path):
-            need_load = True
-        else:
-            try:
-                con = sqlite3.connect(self.hpoa_db_path)
-                cur = con.cursor()
-                cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hpoa'")
-                has_table = cur.fetchone() is not None
-                if not has_table:
-                    need_load = True
-                else:
-                    # lightweight presence check instead of full COUNT(*)
-                    cur.execute("SELECT 1 FROM hpoa LIMIT 1")
-                    if cur.fetchone() is None:
-                        need_load = True
-            finally:
-                try:
-                    con.close()
-                except Exception:
-                    pass
-
-        if need_load:
-            await self.fetch_and_parse_hpoa(path=path)
-        else:
-            # Ensure indexes exist even if table already populated
-            try:
-                con = sqlite3.connect(self.hpoa_db_path)
-                cur = con.cursor()
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid ON hpoa(database_id)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid_norm ON hpoa(UPPER(REPLACE(database_id,' ','')))")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dname_nocase ON hpoa(disease_name COLLATE NOCASE)")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_ref_upper ON hpoa(UPPER(reference))")
-                cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_hp_upper ON hpoa(UPPER(hpo_id))")
-                con.commit()
-            finally:
-                try:
-                    con.close()
-                except Exception:
-                    pass
-
-    def _persist_hpoa_to_db(self, rows: List[Dict[str, str]]) -> None:
-        """Persist HPOA rows into SQLite DB (overwrites existing table)."""
-        if not self.hpoa_db_path:
-            base = os.environ.get("AURELIAN_WORKDIR") or os.getcwd()
-            self.hpoa_db_path = os.path.join(base, "hpoa.db")
-
-        db_dir = os.path.dirname(self.hpoa_db_path)
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
+    def database_has_rows(self) -> bool:
+        if not self.hpoa_db_path or not os.path.exists(self.hpoa_db_path):
+            return False
         con = sqlite3.connect(self.hpoa_db_path)
         try:
-            # Set PRAGMAs BEFORE starting a transaction; changing these inside a transaction
-            # causes: "Safety level may not be changed inside a transaction".
+            cur = con.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='hpoa'")
+            if cur.fetchone() is None:
+                return False
+            cur.execute("SELECT 1 FROM hpoa LIMIT 1")
+            return cur.fetchone() is not None
+        finally:
+            con.close()
+
+    def persist_hpoa_to_db(self, rows: List[Dict[str, str]]) -> None:
+        if not rows:
+            raise ValueError("Cannot persist empty HPOA rows")
+        con = sqlite3.connect(self.hpoa_db_path)
+        try:
             con.execute("PRAGMA journal_mode = MEMORY")
             con.execute("PRAGMA synchronous = OFF")
             con.execute("PRAGMA temp_store = MEMORY")
-            con.execute("PRAGMA cache_size = -64000") # 64 MB in cache
+            con.execute("PRAGMA cache_size = -64000")
 
-            # Explicit transaction for bulk load
             con.execute("BEGIN IMMEDIATE")
             cur = con.cursor()
             cur.execute(
@@ -288,79 +240,60 @@ class HPOADependencies(HasWorkdir):
                 )
                 """
             )
-            # overwrite existing table contents
             cur.execute("DELETE FROM hpoa")
-
-            to_tuples = [
-                (
-                    row.get("database_id"),
-                    row.get("disease_name"),
-                    row.get("qualifier"),
-                    row.get("hpo_id"),
-                    row.get("reference"),
-                    row.get("evidence"),
-                    row.get("onset"),
-                    row.get("frequency"),
-                    row.get("sex"),
-                    row.get("modifier"),
-                    row.get("aspect"),
-                    row.get("biocuration"),
-                )
-                for row in rows
-            ]
             cur.executemany(
                 "INSERT INTO hpoa (database_id, disease_name, qualifier, hpo_id, reference, evidence, onset, frequency, sex, modifier, aspect, biocuration) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                to_tuples,
+                [
+                    (
+                        row.get("database_id"),
+                        row.get("disease_name"),
+                        row.get("qualifier"),
+                        row.get("hpo_id"),
+                        row.get("reference"),
+                        row.get("evidence"),
+                        row.get("onset"),
+                        row.get("frequency"),
+                        row.get("sex"),
+                        row.get("modifier"),
+                        row.get("aspect"),
+                        row.get("biocuration"),
+                    )
+                    for row in rows
+                ],
             )
-            # indexes to accelerate lookups (including expression indexes used in queries)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid ON hpoa(database_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid_norm ON hpoa(UPPER(REPLACE(database_id,' ','')))")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dname_nocase ON hpoa(disease_name COLLATE NOCASE)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_ref_upper ON hpoa(UPPER(reference))")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_hp_upper ON hpoa(UPPER(hpo_id))")
+            self.ensure_indexes(con)
             con.commit()
         finally:
             con.close()
 
-    def _persist_df_to_db(self, df):
-        """Persist a pandas DataFrame to SQLite, replacing the hpoa table and adding indexes."""
-        if not self.hpoa_db_path:
-            base = os.environ.get("AURELIAN_WORKDIR") or os.getcwd()
-            self.hpoa_db_path = os.path.join(base, "hpoa.db")
+    def ensure_indexes(self, con: sqlite3.Connection) -> None:
+        cur = con.cursor()
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid ON hpoa(database_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid_norm ON hpoa(UPPER(REPLACE(database_id,' ','')))")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dname_nocase ON hpoa(disease_name COLLATE NOCASE)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_ref_upper ON hpoa(UPPER(reference))")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_hp_upper ON hpoa(UPPER(hpo_id))")
 
-        db_dir = os.path.dirname(self.hpoa_db_path)
-        if db_dir:
-            os.makedirs(db_dir, exist_ok=True)
-        con = sqlite3.connect(self.hpoa_db_path)
-        try:
-            con.execute("PRAGMA journal_mode = MEMORY")
-            con.execute("PRAGMA synchronous = OFF")
-            con.execute("PRAGMA temp_store = MEMORY")
-            con.execute("PRAGMA cache_size = -64000") # 64 MB cache
-            # Replace table using pandas in a single efficient transaction
-            df.to_sql("hpoa", con, if_exists="replace", index=False, chunksize=5000, method=None)
-            cur = con.cursor()
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid ON hpoa(database_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dbid_norm ON hpoa(UPPER(REPLACE(database_id,' ','')))")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_dname_nocase ON hpoa(disease_name COLLATE NOCASE)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_ref_upper ON hpoa(UPPER(reference))")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_hpoa_hp_upper ON hpoa(UPPER(hpo_id))")
-            con.commit()
-        finally:
-            con.close()
 
+def default_cache_root() -> Path:
+    """Resolve the directory used to cache phenotype.hpoa and hpoa.db."""
+    cache_dir = os.environ.get("HPOA_CACHE_DIR")
+    if cache_dir:
+        return Path(cache_dir).expanduser().resolve()
+    return (Path.home() / ".aurelian" / "hpoa").resolve()
 def get_config() -> HPOADependencies:
-    """Get the HPOA configuration from environment variables or defaults."""
-    workdir_path = os.environ.get("AURELIAN_WORKDIR", None)
-    workdir = WorkDir(location=workdir_path) if workdir_path else None
-    
-    return HPOADependencies(
-        workdir=workdir
-    )    
+    """Create default dependencies, respecting any CLI-provided workdir."""
+    workdir_path = os.environ.get("AURELIAN_WORKDIR")
+    workdir = WorkDir(location=workdir_path) if workdir_path else WorkDir()
+    return HPOADependencies(workdir=workdir)
 
-def _read_hpoa_from_path(path: str) -> List[Dict[str, str]]:
+def read_hpoa_from_path(path: str) -> List[Dict[str, str]]:
     """Read a local phenotype.hpoa TSV file preserving columns."""
     with open(path, "r", encoding="utf-8") as fh:
-        lines = [ln for ln in fh.read().splitlines() if ln.strip() and not ln.startswith("#")]
-    reader = csv.DictReader(lines, delimiter="\t")
+        return parse_hpoa_text(fh.read())
+
+def parse_hpoa_text(text: str) -> List[Dict[str, str]]:
+    """Parse a phenotype.hpoa TSV string into dictionaries."""
+    lines = [ln for ln in text.splitlines() if ln.strip() and not ln.startswith("#")]
+    reader = csv.DictReader(lines, delimiter="	")
     return list(reader)

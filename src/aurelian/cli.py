@@ -47,6 +47,7 @@ agent_option = click.option(
 workdir_option = click.option(
     "--workdir",
     "-w",
+    envvar="AURELIAN_WORKDIR",
     default="workdir",
     show_default=True,
     help="The working directory for the agent.",
@@ -193,15 +194,25 @@ def run_agent(
     agent_keys = ["model", "use_cborg", "workdir", "ontologies", "db_path", "collection_name"]
     agent_options, launch_options = split_options(kwargs, agent_keys=agent_keys, extra_agent_keys=extra_agent_keys)
 
+    # Normalize workdir input and expose it via AURELIAN_WORKDIR before building dependencies.
+    workdir_value = agent_options.get('workdir')
+    workdir_path = None
+    if workdir_value:
+        workdir_path = os.path.abspath(os.fspath(workdir_value))
+        os.environ['AURELIAN_WORKDIR'] = workdir_path
+        agent_options['workdir'] = workdir_path
+    else:
+        agent_options.pop('workdir', None)
+        if 'AURELIAN_WORKDIR' in os.environ:
+            workdir_path = os.path.abspath(os.fspath(os.environ['AURELIAN_WORKDIR']))
+
     deps = get_config()
 
-    # Set workdir if provided
-    if 'workdir' in agent_options and agent_options['workdir']:
-        if hasattr(deps, 'workdir') and deps.workdir:
-            deps.workdir.location = agent_options['workdir']
+    if workdir_path and hasattr(deps, 'workdir') and deps.workdir:
+        deps.workdir.location = workdir_path
 
-    # Remove workdir from agent options to avoid duplicates
     agent_run_options = {k: v for k, v in agent_options.items() if k != 'workdir'}
+
 
     if use_cborg:
         cborg_api_key = os.environ.get("CBORG_API_KEY")
@@ -279,13 +290,23 @@ def agent(ui, query, agent, use_cborg=False, run_evals=False, eval_filter=None, 
     agent_keys = ["model", "use_cborg", "workdir", "ontologies", "db_path", "collection_name"]
     agent_options, launch_options = split_options(kwargs, agent_keys=agent_keys)
 
+    # Normalize workdir input and expose it via AURELIAN_WORKDIR before building dependencies.
+    workdir_value = agent_options.get('workdir')
+    workdir_path = None
+    if workdir_value:
+        workdir_path = os.path.abspath(os.fspath(workdir_value))
+        os.environ['AURELIAN_WORKDIR'] = workdir_path
+        agent_options['workdir'] = workdir_path
+    else:
+        agent_options.pop('workdir', None)
+        if 'AURELIAN_WORKDIR' in os.environ:
+            workdir_path = os.path.abspath(os.fspath(os.environ['AURELIAN_WORKDIR']))
+
     deps = get_config()
 
-    # Set workdir if provided
-    if hasattr(deps, 'workdir'):
-        deps.workdir.location = kwargs['workdir']
+    if workdir_path and hasattr(deps, 'workdir') and deps.workdir:
+        deps.workdir.location = workdir_path
 
-    # Remove workdir from agent options to avoid duplicates
     agent_run_options = {k: v for k, v in agent_options.items() if k != 'workdir'}
 
     # TODO: make this generic, for any proxy model
@@ -391,7 +412,6 @@ def gocam(ui, query, agent, **kwargs):
 
 
 @main.command()
-@model_option
 @workdir_option
 @share_option
 @server_port_option
@@ -756,7 +776,6 @@ def goann(ui, query, **kwargs):
     run_agent("goann", "aurelian.agents.goann", query=query, ui=ui, **kwargs)
 
 @main.command()
-@model_option
 @workdir_option
 @share_option
 @server_port_option
@@ -764,9 +783,9 @@ def goann(ui, query, **kwargs):
 @click.option(
     "--retry/--no-retry",
     'use_retry',
-    default=True,
+    default=False,
     show_default=True,
-    help="Retry the agent once on transient errors before failing.",
+    help="Retry the agent once on transient errors before failing (disabled by default).",
 )
 @click.option(
     "--history/--no-history",
@@ -774,15 +793,20 @@ def goann(ui, query, **kwargs):
     "use_history",
     default=None,
     show_default=False,
-    help="Override the HPOA_HISTORY setting for this run (1 = history, 0 = fresh).",
+    help="Save or skip chat transcripts for this run (history is on by default).",
+)
+@click.option(
+    "--history-dir",
+    type=click.Path(path_type=Path),
+    help="Directory to store HPOA chat history files. Defaults to <workdir>/hpoa_history.",
 )
 @click.option(
     "--agent",
     "agent_variant",
-    type=click.Choice(["standard", "simple", "reasoning"], case_sensitive=False),
+    type=click.Choice(["standard", "reasoning"], case_sensitive=False),
     default="standard",
     show_default=True,
-    help="Select the HPOA agent variant (standard, simple, or reasoning).",
+    help="Select the HPOA agent variant (standard or reasoning).",
 )
 @click.option(
     "--output",
@@ -792,7 +816,7 @@ def goann(ui, query, **kwargs):
     help="Write the agent's structured output to the given JSON file.",
 )
 @click.argument("query", nargs=-1, required=False)
-def hpoa(ui, query, use_retry, use_history, agent_variant, output_path, **kwargs):
+def hpoa(ui, query, use_retry, use_history, history_dir, agent_variant, output_path, **kwargs):
     """Run the HPOA Agent for Human Phenotype Ontology annotations.
 
     Usage: Direct query: aurelian hpoa "What phenotypes are associated with Fabry disease?" Interactive chat: aurelian hpoa --ui
@@ -800,11 +824,10 @@ def hpoa(ui, query, use_retry, use_history, agent_variant, output_path, **kwargs
     Supports disease -> phenotype lookups (OMIM/MONDO/label/PMID), 
     phenotype concept queries (HP:ID/label), and curation mode (e.g. "Suggest phenotype annotations for Coffin-Lowry syndrome").
     """
+    kwargs.pop("model", None)
+
     if ui and output_path:
         raise click.UsageError("--output is only supported in direct query mode.")
-
-    if use_history is not None:
-        os.environ["HPOA_HISTORY"] = "1" if use_history else "0"
 
     normalized_variant = (agent_variant or "standard").lower()
 
@@ -814,9 +837,10 @@ def hpoa(ui, query, use_retry, use_history, agent_variant, output_path, **kwargs
         agent_func_name="call_agent_sync",
         query=query,
         ui=ui,
-        extra_agent_keys=["use_retry", "use_history", "agent_variant", "output_path"],
+        extra_agent_keys=["use_retry", "use_history", "history_dir", "agent_variant", "output_path"],
         use_retry=use_retry,
         use_history=use_history,
+        history_dir=history_dir,
         agent_variant=normalized_variant,
         output_path=output_path,
         **kwargs,

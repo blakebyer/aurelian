@@ -3,13 +3,14 @@ Tools for interacting with MONDO, HPO, and HPOA files.
 """
 from typing import List, Literal, Dict
 from typing_extensions import TypedDict
+import asyncio
 import httpx
 import re, sqlite3, inspect
 from pydantic_ai import RunContext, ModelRetry
-from .hpoa_config import HPOADependencies, HPOA, get_config, get_client
+from aurelian.utils.pdf_fetcher import extract_text_from_pdf_url
+from aurelian.agents.hpoa.hpoa_config import HPOADependencies, HPOA, get_config, get_client
 from aurelian.agents.literature.literature_tools import (
-    lookup_pmid as literature_lookup_pmid,
-    literature_search_pmids as literature_search_pmids,
+    lookup_pmid,
     )
 from oaklib.datamodels.search import SearchConfiguration
 
@@ -442,7 +443,7 @@ async def filter_hpoa_by_pmid(ctx: RunContext[HPOADependencies], pmid: str) -> L
             print(f"Skipping row due to error: {e}")
     return results
 
-async def lookup_pmid(pmid: str) -> str:
+async def lookup_pmid_text(pmid: str) -> str:
     """Return the abstract or full text for a PubMed article.
 
     Args:
@@ -451,18 +452,24 @@ async def lookup_pmid(pmid: str) -> str:
     Returns:
         str: Text blob provided by the backing literature tool.
     """
-    return await literature_lookup_pmid(pmid)
+    return await lookup_pmid(pmid)
 
-async def lookup_literature(query: str) -> List[str]:
-    """Search the literature helper for PMIDs that match the query.
+async def extract_text_from_pdf(pdf_url: str) -> str:
+    """
+    Extract text from a PDF at the given URL.
 
     Args:
-        query: Free-text search phrase describing the desired topic.
+        ctx: Execution context providing shared HTTP client reuse.
+        pdf_url: URL to the PDF file
 
     Returns:
-        List[str]: Candidate PMIDs returned by the upstream helper.
+        str: The extracted text content
     """
-    return await literature_search_pmids(query)
+    print(f"EXTRACT PDF: {pdf_url}")
+    try:
+        return extract_text_from_pdf_url(pdf_url)
+    except Exception as exc:
+        raise ModelRetry(f"Error retrieving PDF from URL: {pdf_url}: {exc}")
 
 async def filter_hpoa_by_hp(ctx: RunContext[HPOADependencies], hp: str) -> List[HPOA]:
     """Return phenotype.hpoa rows tied to the requested HPO identifier.
