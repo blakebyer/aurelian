@@ -12,7 +12,6 @@ import httpx
 from oaklib import get_adapter
 from oaklib.interfaces import BasicOntologyInterface
 from pydantic import BaseModel, Field, model_validator
-
 from aurelian.dependencies.workdir import HasWorkdir, WorkDir
 
 # Module-level singletons for ontology adapters to avoid repeated loads
@@ -44,14 +43,41 @@ class HPOA(BaseModel):
                               Terms with the I aspect are from the Inheritance subontology.
                               Terms with the C aspect are located in the Clinical course subontology, which includes onset, mortality, and other terms related to the temporal aspects of disease.
                               Terms with the M aspect are located in the Clinical Modifier subontology.""")	
-    biocuration: str = Field(..., 
-                             default_factory = lambda: f"HPO:Agent[{date.today().isoformat()}]",description="""This refers to the biocurator who made the annotation and the date on which the annotation was made; the date format is YYYY-MM-DD. The first entry in this field refers to the creation date. Any additional biocuration is recorded following a semicolon. So, if Joseph curated on July 5, 2012, and Suzanna curated on December 7, 2015, one might have a field like this: HPO:Joseph[2012-07-05];HPO:Suzanna[2015-12-07]. It is acceptable to use ORCID ids.""")
-    @model_validator(mode="before")
-    @classmethod
-    def default_biocuration(cls, data: Any):
-        if isinstance(data, dict):
-            data.pop("biocuration", None)  # refuse any provided value
+    biocuration: str = Field(...,default_factory = lambda: f"HPO:Agent[{date.today().isoformat()}]", description="""This refers to the biocurator who made the annotation and the date on which the annotation was made; the date format is YYYY-MM-DD. The first entry in this field refers to the creation date. Any additional biocuration is recorded following a semicolon. So, if Joseph curated on July 5, 2012, and Suzanna curated on December 7, 2015, one might have a field like this: HPO:Joseph[2012-07-05];HPO:Suzanna[2015-12-07]. It is acceptable to use ORCID ids.""")
+    @model_validator(mode="before") 
+    @classmethod 
+    def default_biocuration(cls, data: Any): 
+        if isinstance(data, dict): 
+            data.pop("biocuration", None) # refuse any provided value 
         return data
+    @model_validator(mode="after")
+    def validate_terms(self):
+        config = get_config()
+        hp_adapter = config.get_hp_adapter()
+        mondo_adapter = config.get_mondo_adapter()
+    
+        # HPO term checks
+        if not (self.hpo_id and hp_adapter.label(self.hpo_id)):
+            raise ValueError(f"HPO term not found: {self.hpo_id}")
+
+        # optional checks
+        if self.onset and not (
+            hp_adapter.label(self.onset) and
+            self.onset in [s for s in hp_adapter.descendants("HP:0003674")] # onset descendants
+            ):
+            raise ValueError(f"HPO onset term not found: {self.onset}")
+
+        if self.modifier and not (
+            hp_adapter.label(self.modifier) and 
+            self.modifier in [s for s in hp_adapter.descendants("HP:0012823")] # clinical modifier descendants
+            ):
+            raise ValueError(f"HPO modifier term not found: {self.modifier}")
+
+        # database_id is in phenotype.hpoa or exists in mondo
+        if not (config.database_id_exists(self.database_id) or mondo_adapter.label(self.database_id)):
+            raise ValueError(f"database_id is not in phenotype.hpoa or valid MONDO term: {self.database_id}")
+
+        return self
 
 class HPOAResult(BaseModel):
     status: Literal["existing", "add", "edit", "remove"] = Field(
@@ -80,8 +106,8 @@ class HPOADependencies(HasWorkdir):
     cache_dir: Optional[str] = None
     hpoa_db_path: Optional[str] = None
     hpoa_tsv_path: Optional[str] = None
-    _hp_adapter: Optional[BasicOntologyInterface] = field(default=None, init=False, repr=False)
-    _mondo_adapter: Optional[BasicOntologyInterface] = field(default=None, init=False, repr=False)
+    hp_adapter: Optional[BasicOntologyInterface] = field(default=None, init=False, repr=False)
+    mondo_adapter: Optional[BasicOntologyInterface] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         """Initialize the config with default values."""
@@ -142,9 +168,25 @@ class HPOADependencies(HasWorkdir):
         if HP_ADAPTER_SINGLETON is None:
             HP_ADAPTER_SINGLETON = get_adapter("sqlite:obo:hp")
         return HP_ADAPTER_SINGLETON
+    
+    def database_id_exists(self, dbid: str) -> bool:
+        """Check if a database_id exists in the cached HPOA file."""
+        if not self.hpoa_db_path or not os.path.exists(self.hpoa_db_path):
+            return False
+        con = sqlite3.connect(self.hpoa_db_path)
+        try:
+            cur = con.cursor()
+            cur.execute("SELECT 1 FROM hpoa WHERE database_id = ? LIMIT 1", (dbid,))
+            return cur.fetchone() is not None
+        finally:
+            con.close()
 
     async def fetch_and_parse_hpoa(self, path: Optional[str] = None) -> List[Dict[str, str]]:
-        """Load phenotype.hpoa into cache and refresh the SQLite database."""
+        """
+        Load phenotype.hpoa into cache and refresh the SQLite database.
+            If a local path is given, use that. Otherwise, always fetch the current
+            stable HPOA release from the PURL.
+        """
         source_path: Optional[Path] = None
         if path:
             candidate = Path(path).expanduser().resolve()
@@ -154,6 +196,7 @@ class HPOADependencies(HasWorkdir):
         elif self.hpoa_tsv_path and os.path.exists(self.hpoa_tsv_path):
             source_path = Path(self.hpoa_tsv_path)
 
+        # --- local file already available ---
         if source_path:
             rows = read_hpoa_from_path(str(source_path))
             if source_path != Path(self.hpoa_tsv_path):
@@ -161,23 +204,9 @@ class HPOADependencies(HasWorkdir):
             self.persist_hpoa_to_db(rows)
             return rows
 
+        # --- fetch from stable PURL ---
         http_client = get_client()
-        release_resp = await http_client.get(
-            "https://api.github.com/repos/obophenotype/human-phenotype-ontology/releases/latest"
-        )
-        release_resp.raise_for_status()
-
-        assets = release_resp.json().get("assets", [])
-        try:
-            asset_url = next(
-                candidate
-                for candidate in (asset.get("browser_download_url") for asset in assets)
-                if candidate and "phenotype.hpoa" in candidate
-            )
-        except StopIteration as exc:
-            raise RuntimeError("phenotype.hpoa asset not found in latest release metadata.") from exc
-
-        download_resp = await http_client.get(asset_url)
+        download_resp = await http_client.get("https://purl.obolibrary.org/obo/hp/phenotype.hpoa")
         download_resp.raise_for_status()
         text = download_resp.text
 

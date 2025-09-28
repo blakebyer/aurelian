@@ -3,7 +3,7 @@
 The HPOA agent helps biocurators explore and maintain Human Phenotype Ontology annotations. Use it when you need to:
 - look up phenotypes and diseases across HPO, MONDO, and OMIM
 - inspect or triage existing HPOA rows for a disorder
-- draft additions or removals with supporting evidence from PubMed
+- draft additions or removals with supporting evidence from PubMed or PDF URLs
 
 It supports fast single-question lookups as well as longer, tool-assisted curation sessions.
 
@@ -12,7 +12,7 @@ It supports fast single-question lookups as well as longer, tool-assisted curati
 ## Quick Start
 - CLI (default standard mode):
   ```bash
-  aurelian hpoa "List phenotypes for Marfan syndrome"
+  aurelian hpoa "List all HPOA rows for Marfan syndrome"
   ```
 - Gradio UI:
   ```bash
@@ -145,7 +145,7 @@ Example (truncated):
   ```bash
   aurelian hpoa --retry "Suggest removal of low-confidence phenotypes for ORPHA:580"
   ```
-- **Toggle history caching**
+- **Toggle history caching (history is off by default)**
   ```bash
   aurelian hpoa --history "Summarize phenotypes for polycystic kidney disease"
   aurelian hpoa --no-history "What is the genetic basis for hemophilia?"
@@ -156,8 +156,9 @@ Example (truncated):
   ```
 - **Save the structured output**
   ```bash
-  aurelian hpoa "List phenotypes for Marfan syndrome" --output results/marfan.json
+  aurelian hpoa "List all HPOA rows for Marfan syndrome" --output results/marfan.json
   ```
+  Whatever filename you pass is saved with a `.json` extension containing JSON-formatted text.
 
 ### Sample Playbook
 1. Audit existing annotations (standard):
@@ -180,7 +181,7 @@ Example (truncated):
 ---
 
 ## Example Prompts
-- "What phenotypes are in HPOA for MPS-III?"
+- "What phenotypes are in HPOA for MPS-IIIA?"
 - "Filter HPOA by PMID:7795640 and summarize the annotations"
 - "Suggest removal of low-evidence phenotypes for ORPHA:580"
 - "Provide the OMIM clinical synopsis for Cystic fibrosis"
@@ -195,7 +196,7 @@ Example (truncated):
 - `OPENAI_API_KEY` (required)
 - `OMIM_API_KEY` (required for OMIM tools)
 - `NCBI_API_KEY` (recommended to avoid PubMed rate limits)
-- `AURELIAN_WORKDIR`: optional override for where agents write per-run artifacts (default is a dedicated `workdir/` beside your command).
+- `AURELIAN_WORKDIR`: optional override for where agents write per-run artifacts (defaults to the directory where you launch the CLI).
 - `HPOA_CACHE_DIR`: optional override for the shared cache (defaults to `~/.aurelian/hpoa`).
 
 ### How the Database Path Is Chosen
@@ -204,6 +205,12 @@ Example (truncated):
 3. If the database is missing but `phenotype.hpoa` is available in the cache, it is parsed and the SQLite cache is rebuilt in place.
 4. When neither file exists, the agent downloads the latest `phenotype.hpoa` release into the cache directory and generates `hpoa.db` alongside it.
 
+### Saving History
+- By default, model history (including system prompt, tool calls, and response) is not saved.
+- To enable history logging, you must pass both in CLI:
+  `--history --history-dir <path>`
+- Each session will then create a JSON file in the given directory with a name in the format `history_MM-DD-YYYY_HR-MIN-SEC.json`, such as:
+  `history_09-27-2025_22-37-32.json`
 ---
 
 ## Gradio & MCP

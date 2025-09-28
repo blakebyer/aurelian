@@ -57,9 +57,9 @@ Q&A (default):
   2. batch_search_hp (resolve a list of phenotype labels/IDs together, preferably in one or very few searches)
   3. batch_search_mondo (resolve a list of disease labels/IDs together, preferably in one or very few searches)
   4. children_of / parents_of (children or parents of ontology terms only if asked)
-  5. categorize_hpo/mondo (categories only if asked)
+  5. categorize_hpo/mondo (categories of phenotypes or diseases if asked)
   6. get_omim_clinical (OMIM synopsis -> put result in explanation, annotations=[])
-  Stop when sufficient. Never propose new annotations.
+  Stop when sufficient. Never propose new or edited annotations.
 
 Curation:
   1. filter_hpoa (existing annotations, same limit rule: 20 default, "all" if requested)
@@ -76,6 +76,7 @@ ANNOTATION RULES
 - All IDs must be valid CURIEs.
 
 STOPPING
+- If confused or uncertain, ask the user a follow-up question — do not make up unrelated or nonsensical outputs.
 - Do not loop endlessly between tools.
 - If a tool returns nothing useful, report that clearly and stop.
 - End once enough information has been retrieved to answer the user's query.
@@ -118,7 +119,7 @@ TONE
 MSG_HISTORY: list[ModelMessage] = []
 MAX_HISTORY = 4
 HPOA_HISTORY_FOLDER_NAME = "hpoa_history"
-HPOA_HISTORY_ENABLED_DEFAULT = True
+HPOA_HISTORY_ENABLED_DEFAULT = False
 SESSION_FILENAME = datetime.datetime.now().strftime("%m-%d-%Y_%H-%M-%S")
 
 
@@ -185,6 +186,7 @@ async def keep_recent_messages(messages: list[ModelMessage]) -> list[ModelMessag
 
 # Tool limiter helper class
 class LimitedTool:
+    # example usage: Tool(LimitedTool(tool_name, max_calls = 5).wrap())
     def __init__(self, func: Callable, max_calls: int):
         self.func = func
         self.max_calls = max_calls
@@ -390,6 +392,7 @@ def call_agent_sync(
 ):
     caller = call_agent_with_retry if use_retry else call_agent
     call_kwargs = dict(kwargs)
+    deps_obj = call_kwargs.get("deps")
     result = run_sync(
         caller(
             input,
@@ -402,15 +405,26 @@ def call_agent_sync(
     )
 
     if output_path:
-        _write_output_to_file(_serialise_output(result.output), output_path)
+        target_path = Path(output_path)
+        if not target_path.is_absolute():
+            base_dir = None
+            if deps_obj and getattr(deps_obj, "workdir", None) and getattr(deps_obj.workdir, "location", None):
+                base_dir = Path(deps_obj.workdir.location)
+            if base_dir is None:
+                base_dir = Path.cwd()
+            target_path = base_dir / target_path
+        if target_path.suffix.lower() != '.json':
+            if target_path.suffix:
+                target_path = target_path.with_suffix('.json')
+            else:
+                target_path = target_path.with_name(f"{target_path.name}.json")
+        _write_output_to_file(_serialise_output(result.output), target_path)
 
     return result
 
 
 def _write_output_to_file(output: Any, path_like: Path | str) -> None:
     target_path = Path(path_like)
-    if target_path.suffix.lower() != '.json':
-        raise ValueError('output path must end with .json')
     if target_path.parent:
         target_path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(output, str):

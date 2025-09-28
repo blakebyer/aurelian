@@ -48,9 +48,9 @@ workdir_option = click.option(
     "--workdir",
     "-w",
     envvar="AURELIAN_WORKDIR",
-    default="workdir",
-    show_default=True,
-    help="The working directory for the agent.",
+    default=None,
+    show_default=False,
+    help="The working directory for the agent (defaults to the current directory).",
 )
 share_option = click.option(
     "--share/--no-share",
@@ -150,6 +150,15 @@ def split_options(kwargs, agent_keys: Optional[List]=None, extra_agent_keys: Opt
     return agent_options, launch_options
 
 
+def normalize_workdir(agent_options: dict[str, Any]) -> str:
+    """Determine the effective workdir, falling back to the current directory."""
+    workdir_value = agent_options.pop("workdir", None)
+    candidate = workdir_value or os.environ.get("AURELIAN_WORKDIR") or os.getcwd()
+    workdir_path = os.path.abspath(os.fspath(candidate))
+    os.environ["AURELIAN_WORKDIR"] = workdir_path
+    return workdir_path
+
+
 def run_agent(
     agent_name: str,
     agent_module: str,
@@ -194,24 +203,14 @@ def run_agent(
     agent_keys = ["model", "use_cborg", "workdir", "ontologies", "db_path", "collection_name"]
     agent_options, launch_options = split_options(kwargs, agent_keys=agent_keys, extra_agent_keys=extra_agent_keys)
 
-    # Normalize workdir input and expose it via AURELIAN_WORKDIR before building dependencies.
-    workdir_value = agent_options.get('workdir')
-    workdir_path = None
-    if workdir_value:
-        workdir_path = os.path.abspath(os.fspath(workdir_value))
-        os.environ['AURELIAN_WORKDIR'] = workdir_path
-        agent_options['workdir'] = workdir_path
-    else:
-        agent_options.pop('workdir', None)
-        if 'AURELIAN_WORKDIR' in os.environ:
-            workdir_path = os.path.abspath(os.fspath(os.environ['AURELIAN_WORKDIR']))
+    workdir_path = normalize_workdir(agent_options)
 
     deps = get_config()
 
     if workdir_path and hasattr(deps, 'workdir') and deps.workdir:
         deps.workdir.location = workdir_path
 
-    agent_run_options = {k: v for k, v in agent_options.items() if k != 'workdir'}
+    agent_run_options = dict(agent_options)
 
 
     if use_cborg:
@@ -290,24 +289,14 @@ def agent(ui, query, agent, use_cborg=False, run_evals=False, eval_filter=None, 
     agent_keys = ["model", "use_cborg", "workdir", "ontologies", "db_path", "collection_name"]
     agent_options, launch_options = split_options(kwargs, agent_keys=agent_keys)
 
-    # Normalize workdir input and expose it via AURELIAN_WORKDIR before building dependencies.
-    workdir_value = agent_options.get('workdir')
-    workdir_path = None
-    if workdir_value:
-        workdir_path = os.path.abspath(os.fspath(workdir_value))
-        os.environ['AURELIAN_WORKDIR'] = workdir_path
-        agent_options['workdir'] = workdir_path
-    else:
-        agent_options.pop('workdir', None)
-        if 'AURELIAN_WORKDIR' in os.environ:
-            workdir_path = os.path.abspath(os.fspath(os.environ['AURELIAN_WORKDIR']))
+    workdir_path = normalize_workdir(agent_options)
 
     deps = get_config()
 
     if workdir_path and hasattr(deps, 'workdir') and deps.workdir:
         deps.workdir.location = workdir_path
 
-    agent_run_options = {k: v for k, v in agent_options.items() if k != 'workdir'}
+    agent_run_options = dict(agent_options)
 
     # TODO: make this generic, for any proxy model
     if use_cborg:
@@ -785,15 +774,15 @@ def goann(ui, query, **kwargs):
     'use_retry',
     default=False,
     show_default=True,
-    help="Retry the agent once on transient errors before failing (disabled by default).",
+    help="Retry the agent once on transient errors before failing.",
 )
 @click.option(
     "--history/--no-history",
     "-h/-nh",
     "use_history",
-    default=None,
-    show_default=False,
-    help="Save or skip chat transcripts for this run (history is on by default).",
+    default=False,
+    show_default=True,
+    help="Save or skip chat transcripts for this run.",
 )
 @click.option(
     "--history-dir",
@@ -813,7 +802,7 @@ def goann(ui, query, **kwargs):
     "-o",
     "output_path",
     type=click.Path(path_type=Path),
-    help="Write the agent's structured output to the given JSON file.",
+    help="Write the agent's structured output to a JSON file (suffix coerced to .json).",
 )
 @click.argument("query", nargs=-1, required=False)
 def hpoa(ui, query, use_retry, use_history, history_dir, agent_variant, output_path, **kwargs):

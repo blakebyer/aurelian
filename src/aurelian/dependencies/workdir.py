@@ -21,7 +21,7 @@ class WorkDir:
         >>> wd.read_file("test.txt")
         'Hello, world!'
     """
-    location: str = field(default_factory=lambda: "/tmp")
+    location: str = field(default_factory=lambda: str(Path.cwd()))
 
     @classmethod
     def create_temporary_workdir(cls) -> "WorkDir":
