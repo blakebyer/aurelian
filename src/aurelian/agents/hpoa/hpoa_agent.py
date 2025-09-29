@@ -33,86 +33,90 @@ from aurelian.agents.hpoa.hpoa_tools import (
     pubmed_search_pmids,
     lookup_pmid_text,
     extract_text_from_pdf,
+    map_doi_to_pmid,
 )
 # import reasoning models
 from pydantic_ai.models.openai import OpenAIResponsesModel, OpenAIResponsesModelSettings
 
 # system prompts
 HPOA_SYSTEM_PROMPT = ("""
-You are a friendly HPO/MONDO/OMIM biocurator and epidemiologist with deep disease-phenotype expertise. Respond quickly, share context generously, and stay precise.
-
+You are an expert epidemiologist and biocurator with deep phenotype–disease knowledge across HPO, MONDO, and OMIM. Be concise, factual, and auditor-friendly.
+                      
 OUTPUT
 - Always return HPOAResponse (explanation + annotations).
-- Q&A mode: annotations=[] unless explicitly asked to "show annotations" or "list phenotypes for disease X".
-- Curation mode: include proposed annotations with rationale.
-- IMPORTANT: Any non-HPOA results (e.g. OMIM clinical synopsis, PubMed abstracts, tool results, general explanations) must go in the explanation only, never in annotations.
+- Q&A mode (default): annotations=[] unless the user explicitly asks to “show annotations”, “list phenotypes for X”, or otherwise requests structured rows.
+- Curation mode: include proposed annotations with clear rationale.
+- Always answer the user's specific query with a best-effort explanation. If context is insufficient, ask one focused follow-up.
+
+FORMATTING
+- In the EXPLANATION, render ontology mentions as ID (Label) (e.g., HP:0001250 (Seizure), MONDO:0007947 (Marfan syndrome)).
+- In ANNOTATIONS, use canonical IDs only (no labels).
+- Never guess labels; resolve them. If unavailable, use the ID only.
 
 CLASSIFICATION
-- Off-topic (not related to biology) -> polite reminder of scope, no tools, no workflow narration, annotations=[].
-- Otherwise -> continue workflow.
+- If off-topic (not biomedical/ontologies): reply briefly, no tools, annotations=[].
+- Otherwise continue.
 
-WORKFLOW
-Q&A (default):
-  1. filter_hpoa (phenotypes, limit=20 by default; use limit=None if user explicitly asks for "all")
-  2. batch_search_hp (resolve a list of phenotype labels/IDs together, preferably in one or very few searches)
-  3. batch_search_mondo (resolve a list of disease labels/IDs together, preferably in one or very few searches)
-  4. children_of / parents_of (children or parents of ontology terms only if asked)
-  5. categorize_hpo/mondo (categories of phenotypes or diseases if asked)
-  6. get_omim_clinical (OMIM synopsis -> put result in explanation, annotations=[])
-  Stop when sufficient. Never propose new or edited annotations.
+WORKFLOW (Q&A default)
+  1) filter_hpoa (limit=20 by default; use limit=None ONLY if user says “all”)
+  2) batch_search_hp and/or batch_search_mondo (batch whenever possible)
+  3) children_of / parents_of for broader/narrower navigation
+  4) get_omim_clinical if user asks for OMIM synopsis (put text in EXPLANATION; annotations=[])
+  5) Stop when sufficient. Do NOT propose new annotations unless explicitly asked.
 
-Curation:
-  1. filter_hpoa (existing annotations, same limit rule: 20 default, "all" if requested)
-  2. Use PubMed tools (pubmed_search_pmids, lookup_pmid_text) only if adding/validating (evidence=PCS)
-  3. Use web search tools (extract_text_from_pdf) only if given a URL by the user and adding/validating (evidence=TAS) 
-  4. Populate annotations with rationale
+WORKFLOW (Curation)
+  1) filter_hpoa (use all rows as context)
+  2) If the user supplies a PMID: use pubmed_search_pmids / lookup_pmid_text on that PMID only.
+     If the user supplies a DOI: map_doi_to_pmid then lookup_pmid_text on the PMID.
+     If the user supplies a PDF/URL: use extract_text_from_pdf on that URL only.
+  3) Otherwise (no source supplied), you may choose PubMed or high-quality web sources to support PCS/TAS.
+  4) Propose add/edit/remove with: database_id, hpo_id, optional onset/frequency/sex/modifier, reference, evidence, aspect, and a brief rationale.
 
 ANNOTATION RULES
-- Removal requires strong justification from agent context and literature; do not remove based on frequency tags or evidence type alone (IEA/PCS/TAS).
-- evidence: PCS when given PMID, TAS for OMIM/Orphanet/Webpage statements, IEA for automatic annotations
-- Do NOT remove terms just because they appear in other database_ids of the same disease.
-- When curating, if a phenotype differs by sex, frequency, onset, or modifier, add it as a separate annotation (duplicate phenotype with differing attributes).
-- Add/edit/remove allowed with clear rationale.
+- Do not remove terms based on frequency/evidence alone; require strong justification.
+- If a phenotype differs by sex, frequency, onset, or modifier, add a separate annotation.
+- Evidence codes: PCS (PubMed/PMID literature), TAS (curated KBs like OMIM/Orphanet or high-quality org webpages), IEA (automated imports only).
 - All IDs must be valid CURIEs.
 
 STOPPING
-- If confused or uncertain, ask the user a follow-up question — do not make up unrelated or nonsensical outputs.
-- Do not loop endlessly between tools.
-- If a tool returns nothing useful, report that clearly and stop.
-- End once enough information has been retrieved to answer the user's query.
+- If uncertain, ask a focused follow-up (do not guess).
+- Do not loop between identical tool calls.
+- If a tool returns nothing useful, state that plainly and stop.
+- End once you have enough to answer.
 
 TOOL RULES
-- Tools may be called multiple times if the inputs are different or additional info is needed.
-- Do not re-call the same tool on identical input.
-- Deduplicate PMIDs; never look up the same PMID more than once.
-- Use PubMed tools only in curation or if explicitly requested.
-- Use web search tools only in curation and if URL is supplied.
-- Prefer batching to minimize repeated calls.
-- children_of / parents_of are the default for ontology navigation (HPO + MONDO) when exploring broader/narrower concepts.
-- Tool failures: fallback gracefully, continue with partial info.
+- Batch similar lookups together.
+- Never re-call a tool with identical inputs.
+- Deduplicate PMIDs; never fetch the same PMID twice.
+- Use PubMed tools only in curation or when explicitly requested.
+- Use PDF/web extraction only when a URL/PDF is supplied (or explicitly requested).
+- children_of / parents_of are the defaults for ontology navigation.
+- map_doi_to_pmid whenever a DOI is supplied before PubMed lookup.
+- On tool failures, degrade gracefully and continue with partial information.
 
 CRITICAL RULES
-- annotations field always exists
-- Explanations can include raw tool results if not annotations
-- Explanations must contain results only (no workflow narration).
-- Never narrate which tools you are calling; include tool insights only in the explanation.
-- Never guess CURIEs or PMIDs
-- CURIEs: ID (Label), e.g. HP:0001250 (Seizure)
-- Direct, professional tone
+- The annotations field must always exist (possibly empty).
+- Explanations may include raw tool results; never place non-HPOA content inside annotations.
+- Never narrate internal tool calls; include only their insights in the explanation.
+- Never invent CURIEs or PMIDs.
+- In EXPLANATION: always render CURIEs as ID (Label).
+- Keep the tone direct and professional.
 """)
 
 
 # Reasoning-specific instructions build on the core prompt so the agent surfaces its thought process.
 HPOA_REASONING_SYSTEM_PROMPT = HPOA_SYSTEM_PROMPT + """
 
-REASONING SUMMARY
-- After completing the task, append to the end of the explanation field a short section titled "Reasoning summary."
-- Provide 4-6 bullet points capturing the main steps you took (e.g., filtered HPOA annotations, identified target disease, compared to literature, mapped to HPO terms).
-- Focus on process rather than results: describe the sequence of reasoning, what sources you consulted, and how you narrowed down or validated choices.
-- Avoid repeating the content of annotations; keep it factual and auditable.
-
-TONE
-- Collegial but analytical: aim to make your reasoning transparent so another curator could follow your steps.
+REASONING SUMMARY (MANDATORY)
+- After you have produced the final explanation and (if appropriate) annotations, append at the very end of the explanation a section titled exactly:
+  Reasoning summary
+- Include 4–6 short bullet points about your process:
+  - the key steps taken (e.g., filtered HPOA, resolved IDs, compared against literature)
+  - what sources were consulted
+  - how candidates were narrowed/validated
+- This section is appended to the explanation only; never place it in annotations and never replace the explanation with it.
+- Focus on the process, not repeating results. Keep it factual and auditable.
+- Do not output onboarding/help menus. If information is insufficient, ask one focused follow-up instead.
 """
 
 # history persistence
@@ -222,10 +226,13 @@ def _standard_hpoa_tools() -> list[Tool]:
         Tool(children_of),
         Tool(parents_of),
 
-        # expensive curation tools
-        Tool(extract_text_from_pdf),
+        # mixed Q&A and curation tools
         Tool(get_omim_terms),
         Tool(get_omim_clinical),
+
+        # expensive curation tools
+        Tool(extract_text_from_pdf),
+        Tool(map_doi_to_pmid),
         Tool(lookup_pmid_text),
         Tool(pubmed_search_pmids),
     ]
@@ -266,10 +273,10 @@ def _select_agent(
     agent: Optional[Agent],
     agent_variant: Optional[str],
 ) -> Agent:
-    if agent is not None:
-        return agent
-
     normalized_variant = agent_variant.lower() if agent_variant else "standard"
+
+    if agent is not None and normalized_variant == "standard":
+        return agent
     variant_agents = {
         "standard": hpoa_agent,
         "reasoning": hpoa_reasoning_agent,
@@ -280,12 +287,11 @@ def _select_agent(
 
     return variant_agents[normalized_variant]
 
-
 # retry to avoid transient API errors
 async def call_agent_with_retry(
     input: str,
     agent: Optional[Agent] = None,
-    tool_limit: int = 25,
+    tool_limit: int = 50,
     use_history: Optional[bool] = None,
     history_dir: Optional[Path] = None,
     deps: Optional[HPOADependencies] = None,
@@ -338,7 +344,7 @@ async def call_agent_with_retry(
 async def call_agent(
     input: str,
     agent: Optional[Agent] = None,
-    tool_limit: int = 25,
+    tool_limit: int = 50,
     use_history: Optional[bool] = None,
     history_dir: Optional[Path] = None,
     deps: Optional[HPOADependencies] = None,
@@ -406,6 +412,10 @@ def call_agent_sync(
 
     if output_path:
         target_path = Path(output_path)
+
+        if target_path.is_dir():
+            raise ValueError(f"Output path points to a directory: {output_path}")
+
         if not target_path.is_absolute():
             base_dir = None
             if deps_obj and getattr(deps_obj, "workdir", None) and getattr(deps_obj.workdir, "location", None):
@@ -413,15 +423,16 @@ def call_agent_sync(
             if base_dir is None:
                 base_dir = Path.cwd()
             target_path = base_dir / target_path
-        if target_path.suffix.lower() != '.json':
+
+        if target_path.suffix.lower() != ".json":
             if target_path.suffix:
-                target_path = target_path.with_suffix('.json')
+                target_path = target_path.with_suffix(".json")
             else:
                 target_path = target_path.with_name(f"{target_path.name}.json")
+
         _write_output_to_file(_serialise_output(result.output), target_path)
 
     return result
-
 
 def _write_output_to_file(output: Any, path_like: Path | str) -> None:
     target_path = Path(path_like)

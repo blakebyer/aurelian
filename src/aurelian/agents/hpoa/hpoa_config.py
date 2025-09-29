@@ -43,13 +43,53 @@ class HPOA(BaseModel):
                               Terms with the I aspect are from the Inheritance subontology.
                               Terms with the C aspect are located in the Clinical course subontology, which includes onset, mortality, and other terms related to the temporal aspects of disease.
                               Terms with the M aspect are located in the Clinical Modifier subontology.""")	
-    biocuration: str = Field(...,default_factory = lambda: f"HPO:Agent[{date.today().isoformat()}]", description="""This refers to the biocurator who made the annotation and the date on which the annotation was made; the date format is YYYY-MM-DD. The first entry in this field refers to the creation date. Any additional biocuration is recorded following a semicolon. So, if Joseph curated on July 5, 2012, and Suzanna curated on December 7, 2015, one might have a field like this: HPO:Joseph[2012-07-05];HPO:Suzanna[2015-12-07]. It is acceptable to use ORCID ids.""")
-    @model_validator(mode="before") 
-    @classmethod 
-    def default_biocuration(cls, data: Any): 
-        if isinstance(data, dict): 
-            data.pop("biocuration", None) # refuse any provided value 
-        return data
+    biocuration: str = Field(..., default_factory=lambda: f"HPO:Agent[{date.today().isoformat()}]", description="""This refers to the biocurator who made the annotation and the date on which the annotation was made; the date format is YYYY-MM-DD. The first entry in this field refers to the creation date. Any additional biocuration is recorded following a semicolon. So, if Joseph curated on July 5, 2012, and Suzanna curated on December 7, 2015, one might have a field like this: HPO:Joseph[2012-07-05];HPO:Suzanna[2015-12-07]. It is acceptable to use ORCID ids.""")
+    @model_validator(mode="after")
+    def build_biocuration(self):
+        config = get_config()
+        today = date.today().isoformat()
+
+        tags = []
+        existing = config.get_biocurator_metadata(
+            self.database_id,
+            self.disease_name,
+            self.qualifier,
+            self.hpo_id,
+            self.onset,
+            self.frequency,
+            self.sex,
+            self.modifier,
+        )
+        # populate with existing entries first, return without HPO Agent and curator
+        if existing:
+            if isinstance(existing, (list, tuple)):
+                existing_str = ";".join(r[0] for r in existing if r and r[0])
+            else:
+                existing_str = str(existing)
+            tags.append(existing_str)
+            return self
+
+        # append curator + agent if it's a new or edited curation
+        if config.curator_id:
+            tags.append(f"HPO:{config.curator_id}[{today}]")
+        tags.append(f"HPO:Agent[{today}]")
+
+        self.biocuration = ";".join(tags)
+        return self
+    
+    @model_validator(mode="after")
+    def build_reference(self):
+        """Ensure reference field is valid; fallback to curator ID if not PMID/OMIM/dbid."""
+        ref = (self.reference or "").strip()
+
+        if ref.startswith("PMID:") or ref.startswith("OMIM:") or ref == self.database_id:
+            return self
+
+        config = get_config()
+        curator_tag = config.curator_id if config.curator_id else "Agent"
+        self.reference = f"HPO:{curator_tag}"
+        return self
+
     @model_validator(mode="after")
     def validate_terms(self):
         config = get_config()
@@ -86,6 +126,42 @@ class HPOAResult(BaseModel):
     rationale: Optional[str] = None
     annotation: HPOA
 
+    @model_validator(mode="after")
+    def mark_duplicates(self):
+        """If annotation already exists in DB, mark status=existing to prevent errant curation."""
+        config = get_config()
+        ann = self.annotation
+
+        with sqlite3.connect(config.hpoa_db_path) as con:
+            cur = con.cursor()
+            cur.execute(
+                """
+                SELECT 1 FROM hpoa
+                WHERE database_id = ?
+                  AND disease_name = ?
+                  AND COALESCE(qualifier, '') = COALESCE(?, '')
+                  AND hpo_id = ?
+                  AND COALESCE(onset, '') = COALESCE(?, '')
+                  AND COALESCE(frequency, '') = COALESCE(?, '')
+                  AND COALESCE(sex, '') = COALESCE(?, '')
+                  AND COALESCE(modifier, '') = COALESCE(?, '')
+                LIMIT 1
+                """,
+                (
+                    ann.database_id,
+                    ann.disease_name,
+                    ann.qualifier,
+                    ann.hpo_id,
+                    ann.onset,
+                    ann.frequency,
+                    ann.sex,
+                    ann.modifier,
+                ),
+            )
+            if cur.fetchone():
+                self.status = "existing"
+        return self
+
 class HPOAResponse(BaseModel):
     """
     Flexible output for conversational + structured use.
@@ -103,6 +179,7 @@ class HPOADependencies(HasWorkdir):
     openai_api_key: Optional[str] = None
     omim_api_key: Optional[str] = None
     ncbi_api_key: Optional[str] = None
+    curator_id: Optional[str] = None
     cache_dir: Optional[str] = None
     hpoa_db_path: Optional[str] = None
     hpoa_tsv_path: Optional[str] = None
@@ -143,6 +220,11 @@ class HPOADependencies(HasWorkdir):
         if self.ncbi_api_key is None:
             self.ncbi_api_key = os.environ.get("NCBI_API_KEY")
 
+        if self.curator_id is None:
+            self.curator_id = os.environ.get("CURATOR_ID")
+        if self.curator_id:
+            self.curator_id = self.curator_id.strip() or None
+
     def _cache_existing_asset(self, filename: str, destination: Path, search_roots: List[Path]) -> None:
         for root in search_roots:
             if root is None:
@@ -178,6 +260,45 @@ class HPOADependencies(HasWorkdir):
             cur = con.cursor()
             cur.execute("SELECT 1 FROM hpoa WHERE database_id = ? LIMIT 1", (dbid,))
             return cur.fetchone() is not None
+        finally:
+            con.close()
+
+    def get_biocurator_metadata(
+        self,
+        dbid: str,
+        disease_name: str,
+        qualifier: Optional[str],
+        hpo_id: str,
+        onset: Optional[str],
+        frequency: Optional[str],
+        sex: Optional[str],
+        modifier: Optional[str],
+    ) -> str:
+        """From all identifying fields, return existing biocurator metadata."""
+        if not self.hpoa_db_path or not os.path.exists(self.hpoa_db_path):
+            return ""
+
+        con = sqlite3.connect(self.hpoa_db_path)
+        try:
+            cur = con.cursor()
+            cur.execute(
+                """
+                SELECT biocuration
+                FROM hpoa
+                WHERE database_id = ?
+                AND disease_name = ?
+                AND COALESCE(qualifier, '') = COALESCE(?, '')
+                AND hpo_id = ?
+                AND COALESCE(onset, '') = COALESCE(?, '')
+                AND COALESCE(frequency, '') = COALESCE(?, '')
+                AND COALESCE(sex, '') = COALESCE(?, '')
+                AND COALESCE(modifier, '') = COALESCE(?, '')
+                LIMIT 1
+                """,
+                (dbid, disease_name, qualifier, hpo_id, onset, frequency, sex, modifier),
+            )
+            row = cur.fetchone()
+            return row[0] if row else ""
         finally:
             con.close()
 

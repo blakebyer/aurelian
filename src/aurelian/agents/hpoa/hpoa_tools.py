@@ -8,6 +8,7 @@ import httpx
 import re, sqlite3, inspect
 from pydantic_ai import RunContext, ModelRetry
 from aurelian.utils.pdf_fetcher import extract_text_from_pdf_url
+from aurelian.utils.pubmed_utils import doi_to_pmid
 from aurelian.agents.hpoa.hpoa_config import HPOADependencies, HPOA, get_config, get_client
 from aurelian.agents.literature.literature_tools import (
     lookup_pmid,
@@ -454,6 +455,21 @@ async def lookup_pmid_text(pmid: str) -> str:
     """
     return await lookup_pmid(pmid)
 
+async def map_doi_to_pmid(doi: str) -> str:
+    """Return a PMID from DOI to be used in the reference field of HPOA.
+
+    Args: 
+        doi: Digital Object Identifier supplied as "10.1126/science.aar3646".
+
+    Returns:
+        str: PMID as provided by backing pubmed utility tool.
+    """
+    print(f"CONVERT DOI: {doi}")
+    try:
+        return doi_to_pmid(doi)
+    except:
+        raise ModelRetry(f"Error converting DOI {doi} to PMID.")
+
 async def extract_text_from_pdf(pdf_url: str) -> str:
     """
     Extract text from a PDF at the given URL.
@@ -527,14 +543,17 @@ async def pubmed_search_pmids(ctx: RunContext[HPOADependencies], query: str, ret
     """
     config = ctx.deps or get_config()
     NCBI_API_KEY = config.ncbi_api_key
+
     url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     params = {
         "db": "pubmed",
         "term": query,
         "retmode": "json",
         "retmax": retmax,
-        "api_key": NCBI_API_KEY or "",
     }
+    if NCBI_API_KEY:  # only include if non-empty
+        params["api_key"] = NCBI_API_KEY
+
     headers = {"Accept": "application/json"}
 
     print(f"SEARCH PUBMED FOR PMIDs RELATED TO: {query}")
@@ -552,11 +571,8 @@ async def pubmed_search_pmids(ctx: RunContext[HPOADependencies], query: str, ret
     except ValueError:
         raise ModelRetry("PubMed search returned non-JSON response")
 
-    # Extract PMIDs from JSON
     pmids = data.get("esearchresult", {}).get("idlist", [])
-    pmids = [f"PMID:{p}" for p in pmids]
-
-    return pmids
+    return [f"PMID:{p}" for p in pmids]
 
 # Helper functions for dealing with ontology hierarchies
 async def children_of(ctx: RunContext[HPOADependencies], parent: str) -> List[str]:

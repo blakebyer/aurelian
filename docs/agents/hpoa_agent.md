@@ -42,10 +42,13 @@ custom_cache = Path.home() / ".aurelian" / "hpoa-demo"
 custom_deps = HPOADependencies(
     workdir=WorkDir(),
     cache_dir=str(custom_cache),
+    curator_id="jcarberry",
 )
 result = run_sync(call_agent("Update annotations for ORPHA:580", deps=custom_deps))
 print(result.output)
 ```
+
+If you set the `CURATOR_ID` environment variable (or pass `--curator-id` on the CLI), the agent records both `HPO:Agent[YYYY-MM-DD]` and `HPO:<curator_id>[YYYY-MM-DD]` provenance tags in the `biocuration` field. If no PMID, OMIM, or database_id reference is found, the `reference` field becomes `HPO:<curator_id>`. 
 
 Both the downloaded `phenotype.hpoa` and the derived `hpoa.db` live inside the cache directory, mirroring how oaklib manages its ontology caches.
 
@@ -55,7 +58,7 @@ Both the downloaded `phenotype.hpoa` and the derived `hpoa.db` live inside the c
 - `standard` (default): full curation workflow with the complete ontology + curation toolbelt (`filter_hpoa`, `batch_search_hp`, `children_of`, `parents_of`, PubMed helpers, etc.) and the structured `HPOAResponse` schema. Pick this for day-to-day annotation review.
 - `reasoning`: same tools as `standard`, but the request goes through the high-effort reasoning model and the explanation ends with a **Reasoning summary** section that lists the key decision steps and tool calls.
 
-Models are fixed per variant (standard uses `openai:gpt-5`, reasoning uses `gpt-5`); there is no CLI override.
+Models are fixed per variant (standard uses `openai:gpt-5`, reasoning uses `gpt-5`); there is no CLI override (subject to change).
 
 If you omit `--agent`, the CLI runs in `standard` mode.
 
@@ -68,6 +71,7 @@ If you omit `--agent`, the CLI runs in `standard` mode.
 - `categorize_mondo`: map diseases to higher-level MONDO groupings.
 - `get_omim_terms`: fetch OMIM records linked to a disease or phenotype.
 - `get_omim_clinical`: retrieve OMIM clinical synopsis text.
+- `map_doi_to_pmid`: convert DOI strings to `PMID:nnnnnnnn` which is ran before `lookup_pmid_text`.
 - `lookup_pmid_text`: pull PubMed abstracts/full text for evidence review.
 - `pubmed_search_pmids`: search PubMed and return matching PMIDs for follow-up.
 - `extract_text_from_pdf`: from a supplied PDF URL, scrape text for evidence review.
@@ -80,6 +84,7 @@ Running `python -m aurelian.agents.hpoa.hpoa_mcp` exposes these same tools over 
 `standard` and `reasoning` both emit an `HPOAResponse` object:
 - `explanation`: narrative summary with citations and tool output. When you run in reasoning mode, a **Reasoning summary** section is appended to the end of the explanation so the decision path is easy to audit.
 - `annotations`: list of proposed or confirmed phenotypes. Each entry includes a `status` (`add`, `existing`, `edit`, or `remove`), a human-readable `rationale`, and the structured annotation payload (disease ID, HPO term, evidence, modifiers, etc.).
+- Each `annotation` in `annotations` complies with the `HPOA` schema: [ℹ️ HPOA Format](https://hpo-annotation-qc.readthedocs.io/en/latest/annotationFormat.html)
 
 Example (truncated):
 ```json
@@ -100,7 +105,8 @@ Example (truncated):
         "frequency": null,
         "sex": "",
         "modifier": null,
-        "aspect": "P"
+        "aspect": "P",
+        "biocuration": "HPO:Agent[2025-09-28]"
       }
     },
     {
@@ -117,13 +123,38 @@ Example (truncated):
         "frequency": null,
         "sex": "",
         "modifier": null,
-        "aspect": "P"
+        "aspect": "P",
+        "biocuration": "HPO:Agent[2025-09-28]"
       }
     }
   ]
 }
 ```
+---
+## Model Validation
+Every proposed annotation goes through a chain of validators before being accepted into the structured output. These validators ensure that the agent never suggests nonsensical or redundant rows.
 
+- Ontology checks
+  - `hpo_id` must resolve to a valid HPO term.
+  - `onset` (if provided) must be a descendant of HP:0003674 (Age of onset).
+  - `modifier` (if provided) must be a descendant of HP:0012823 (Clinical modifier).
+  - `database_id` must already exist in `phenotype.hpoa` or resolve to a valid MONDO term.
+
+- Biocuration field
+  - Any user-supplied value is ignored.
+  - The agent automatically records both `HPO:<curator_id>[YYYY-MM-DD]` (if configured) and `HPO:Agent[YYYY-MM-DD]`.
+  - Existing curator tags from the cache are preserved, so provenance grows over time.
+
+- Reference field
+  - Preserved if it begins with "PMID:" or "OMIM:" or matches the disease `database_id`.
+  - Otherwise rewritten to `HPO:<curator_id>` (or `HPO:Agent` if no curator ID is set). __Proceed with caution__ for these annotations.
+
+- Duplicate detection
+  - Before returning, each `HPOAResult` checks the cache to ensure the annotation is not already present.
+  - Duplicates are defined by `database_id`, `disease_name`, `qualifier`, `hpo_id`, `onset`, `frequency`, `sex`, and `modifier`.
+  - If a match is found, the status is flipped to `existing` instead of `add`, so the curator sees the overlap clearly.
+
+These rules guarantee that only valid ontology terms, fresh biocuration provenance, and genuinely new annotations are proposed in agent outputs.
 
 ---
 
@@ -154,11 +185,15 @@ Example (truncated):
   ```bash
   aurelian hpoa --agent reasoning "Explain the difference between OMIM and ORPHA CHIME syndrome phenotype annotations"
   ```
+- **Record curator provenance**
+  ```bash
+  aurelian hpoa --curator-id jcarberry "Curate DOI:10.1002/ccr3.3704 for Wiedemann-Steiner annotations"
+  ```
 - **Save the structured output**
   ```bash
   aurelian hpoa "List all HPOA rows for Marfan syndrome" --output results/marfan.json
   ```
-  Whatever filename you pass is saved with a `.json` extension containing JSON-formatted text.
+  Any suffix you supply is coerced to `.json`; for example, `--output logs/marfan.txt` writes `logs/marfan.json` inside the active working directory. 
 
 ### Sample Playbook
 1. Audit existing annotations (standard):
@@ -183,10 +218,10 @@ Example (truncated):
 ## Example Prompts
 - "What phenotypes are in HPOA for MPS-IIIA?"
 - "Filter HPOA by PMID:7795640 and summarize the annotations"
-- "Suggest removal of low-evidence phenotypes for ORPHA:580"
 - "Provide the OMIM clinical synopsis for Cystic fibrosis"
 - "Which body system is HP:0001297 (Stroke) assigned to?"
-- "Using https://medlineplus.gov/download/genetics/condition/costello-syndrome.pdf, propose adjustments to HPOA for Costello syndrome."
+- "Add phenotypes from DOI:10.1002/ccr3.3704 and use the mapped PMID as reference"
+- "Using https://medlineplus.gov/download/genetics/condition/costello-syndrome.pdf as context, propose adjustments to HPOA for Costello syndrome"
 
 ---
 
@@ -197,7 +232,12 @@ Example (truncated):
 - `OMIM_API_KEY` (required for OMIM tools)
 - `NCBI_API_KEY` (recommended to avoid PubMed rate limits)
 - `AURELIAN_WORKDIR`: optional override for where agents write per-run artifacts (defaults to the directory where you launch the CLI).
+- `CURATOR_ID`: optional default curator identifier recorded in annotations and reference fallbacks.  
+  Recommended format: lowercase `firstinitiallastname` (e.g., `jcarberry`) or an ORCID ID  
+  (e.g., `ORCID:0000-0002-1825-0097`).
 - `HPOA_CACHE_DIR`: optional override for the shared cache (defaults to `~/.aurelian/hpoa`).
+Use `--curator-id` on the CLI to override `CURATOR_ID` for a single run.
+
 
 ### How the Database Path Is Chosen
 1. If `phenotype.hpoa` or `hpoa.db` exist in the current working directory or inside the configured workdir, they are copied into the shared cache (`HPOA_CACHE_DIR` or the default `~/.aurelian/hpoa`) before the agent runs.
@@ -207,8 +247,9 @@ Example (truncated):
 
 ### Saving History
 - By default, model history (including system prompt, tool calls, and response) is not saved.
-- To enable history logging, you must pass both in CLI:
-  `--history --history-dir <path>`
+- To enable history logging, you must pass `--history` in CLI
+- To change the location of history output from the default `hpoa_history` folder, you must specify both:  
+`--history --history-dir <path>`
 - Each session will then create a JSON file in the given directory with a name in the format `history_MM-DD-YYYY_HR-MIN-SEC.json`, such as:
   `history_09-27-2025_22-37-32.json`
 ---

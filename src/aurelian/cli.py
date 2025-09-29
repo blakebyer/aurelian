@@ -142,7 +142,7 @@ def main(verbose: int, quiet: bool):
 def split_options(kwargs, agent_keys: Optional[List]=None, extra_agent_keys: Optional[List] = None):
     """Split options into agent and launch options."""
     if agent_keys is None:
-        agent_keys = ["model", "workdir", "ontologies", "db_path", "collection_name"]
+        agent_keys = ["model", "workdir", "ontologies", "db_path", "collection_name", "curator_id"]
     if extra_agent_keys is not None:
         agent_keys += extra_agent_keys
     agent_options = {k: v for k, v in kwargs.items() if k in agent_keys}
@@ -157,6 +157,27 @@ def normalize_workdir(agent_options: dict[str, Any]) -> str:
     workdir_path = os.path.abspath(os.fspath(candidate))
     os.environ["AURELIAN_WORKDIR"] = workdir_path
     return workdir_path
+
+
+def resolve_curator_id(agent_options: dict[str, Any]) -> Optional[str]:
+    """Resolve curator id from CLI options or environment and normalize it."""
+    curator_value = agent_options.pop("curator_id", None)
+    if curator_value is not None:
+        normalized = str(curator_value).strip()
+        if normalized:
+            os.environ["CURATOR_ID"] = normalized
+            return normalized
+        os.environ.pop("CURATOR_ID", None)
+        return None
+
+    existing = os.environ.get("CURATOR_ID")
+    if existing is None:
+        return None
+    normalized_existing = existing.strip()
+    if not normalized_existing:
+        os.environ.pop("CURATOR_ID", None)
+        return None
+    return normalized_existing
 
 
 def run_agent(
@@ -200,9 +221,10 @@ def run_agent(
     get_config = config_module.get_config
 
     # Process agent and UI options
-    agent_keys = ["model", "use_cborg", "workdir", "ontologies", "db_path", "collection_name"]
+    agent_keys = ["model", "use_cborg", "workdir", "ontologies", "db_path", "collection_name", "curator_id"]
     agent_options, launch_options = split_options(kwargs, agent_keys=agent_keys, extra_agent_keys=extra_agent_keys)
 
+    resolve_curator_id(agent_options)
     workdir_path = normalize_workdir(agent_options)
 
     deps = get_config()
@@ -286,9 +308,10 @@ def agent(ui, query, agent, use_cborg=False, run_evals=False, eval_filter=None, 
     get_config = config_module.get_config
 
     # Process agent and UI options
-    agent_keys = ["model", "use_cborg", "workdir", "ontologies", "db_path", "collection_name"]
+    agent_keys = ["model", "use_cborg", "workdir", "ontologies", "db_path", "collection_name", "curator_id"]
     agent_options, launch_options = split_options(kwargs, agent_keys=agent_keys)
 
+    resolve_curator_id(agent_options)
     workdir_path = normalize_workdir(agent_options)
 
     deps = get_config()
@@ -798,6 +821,11 @@ def goann(ui, query, **kwargs):
     help="Select the HPOA agent variant (standard or reasoning).",
 )
 @click.option(
+    "--curator-id",
+    type=str,
+    help="Identifier for the human curator; overrides CURATOR_ID when provided.",
+)
+@click.option(
     "--output",
     "-o",
     "output_path",
@@ -805,7 +833,7 @@ def goann(ui, query, **kwargs):
     help="Write the agent's structured output to a JSON file (suffix coerced to .json).",
 )
 @click.argument("query", nargs=-1, required=False)
-def hpoa(ui, query, use_retry, use_history, history_dir, agent_variant, output_path, **kwargs):
+def hpoa(ui, query, use_retry, use_history, history_dir, agent_variant, curator_id, output_path, **kwargs):
     """Run the HPOA Agent for Human Phenotype Ontology annotations.
 
     Usage: Direct query: aurelian hpoa "What phenotypes are associated with Fabry disease?" Interactive chat: aurelian hpoa --ui
@@ -817,6 +845,9 @@ def hpoa(ui, query, use_retry, use_history, history_dir, agent_variant, output_p
 
     if ui and output_path:
         raise click.UsageError("--output is only supported in direct query mode.")
+
+    if curator_id is not None:
+        kwargs["curator_id"] = curator_id
 
     normalized_variant = (agent_variant or "standard").lower()
 

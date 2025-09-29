@@ -38,7 +38,7 @@ def extract_doi_from_url(url: str) -> Optional[str]:
     return doi_match.group(1) if doi_match else None
 
 
-def doi_to_pmid(doi: str) -> Optional[str]:
+def doi_to_pmid(doi: str) -> str:
     """Converts a DOI to a PMID using the NCBI ID Converter API.
 
     Args:
@@ -49,13 +49,14 @@ def doi_to_pmid(doi: str) -> Optional[str]:
 
     """
     API_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+    doi = re.sub(r'^(https://doi\.org/|DOI:)', '', doi, flags=re.IGNORECASE)
     params = {"ids": doi, "format": "json"}
     response = requests.get(API_URL, params=_add_api_key(params))
     response.raise_for_status()
     data = response.json()
     records = data.get("records", [])
     pmid = records[0].get("pmid", None) if records else None
-    return pmid
+    return "PMID:" + str(pmid)
 
 
 def get_doi_text(doi: str) -> str:

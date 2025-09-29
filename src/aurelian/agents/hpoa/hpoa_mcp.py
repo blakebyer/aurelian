@@ -128,22 +128,26 @@ async def categorize_mondo(term: str) -> List[str]:
     return await ht.categorize_mondo(ctx(), term)
 
 @mcp.tool()
-async def lookup_pmid(pmid: str) -> str:
+async def lookup_pmid_text(pmid: str) -> str:
     """
     Lookup a PubMed ID to get the article abstract or full text.
     """
-    return await ht.lookup_pmid(pmid)
+    return await ht.lookup_pmid_text(pmid)
 
 @mcp.tool()
-async def pubmed_search_pmids(query: str) -> List[str]:
+async def pubmed_search_pmids(query: str, retmax: int = 20) -> List[str]:
     """Search PubMed (NCBI ESearch) for PMIDs matching a query. Returns ["PMID:nnnnnnn", ...]."""
-    return await ht.pubmed_search_pmids(ctx(), query)
+    return await ht.pubmed_search_pmids(ctx(), query, retmax=retmax)
 
 @mcp.tool()
-async def lookup_literature(query: str) -> List[str]:
-    """Search literature for PMIDs matching a free-text query."""
-    return await ht.lookup_literature(query)
+async def map_doi_to_pmid(doi: str) -> str:
+    """Convert a DOI string to a PMID (PMID:nnnnnnn)."""
+    return await ht.map_doi_to_pmid(doi)
 
+@mcp.tool()
+async def extract_text_from_pdf(pdf_url: str) -> str:
+    """Fetch and extract text from a PDF URL."""
+    return await ht.extract_text_from_pdf(pdf_url)
 
 @mcp.tool()
 async def children_of(term: str) -> List[str]:
